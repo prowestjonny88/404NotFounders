@@ -31,9 +31,12 @@ def _optional_env(name: str) -> str | None:
     return value or None
 
 
-def _path_env(name: str, default: Path) -> Path:
+def _path_env(name: str, default: Path, *, base_dir: Path) -> Path:
     value = _optional_env(name)
-    return Path(value) if value else default
+    if not value:
+        return default
+    path = Path(value)
+    return path if path.is_absolute() else (base_dir / path).resolve()
 
 
 @dataclass(frozen=True)
@@ -51,12 +54,13 @@ class AppSettings:
     @classmethod
     def from_env(cls) -> "AppSettings":
         root_dir = _repo_root()
-        _load_dotenv(root_dir / "apps" / "api" / ".env", root_dir / ".env")
-        data_dir = _path_env("DATA_DIR", root_dir / "data")
-        reference_dir = _path_env("REFERENCE_DIR", data_dir / "reference")
-        snapshot_dir = _path_env("SNAPSHOT_DIR", data_dir / "snapshots")
-        raw_dir = _path_env("RAW_ARTIFACT_DIR", data_dir / "raw")
-        tmp_dir = _path_env("TMP_DIR", data_dir / "tmp")
+        api_dir = root_dir / "apps" / "api"
+        _load_dotenv(api_dir / ".env", root_dir / ".env")
+        data_dir = _path_env("DATA_DIR", root_dir / "data", base_dir=api_dir)
+        reference_dir = _path_env("REFERENCE_DIR", data_dir / "reference", base_dir=api_dir)
+        snapshot_dir = _path_env("SNAPSHOT_DIR", data_dir / "snapshots", base_dir=api_dir)
+        raw_dir = _path_env("RAW_ARTIFACT_DIR", data_dir / "raw", base_dir=api_dir)
+        tmp_dir = _path_env("TMP_DIR", data_dir / "tmp", base_dir=api_dir)
         return cls(
             root_dir=root_dir,
             data_dir=data_dir,

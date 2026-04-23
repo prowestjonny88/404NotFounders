@@ -9,11 +9,20 @@ description = "Ingestion and scraping foundation for the LintasNiaga hackathon b
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+  "fastapi>=0.115.0",
   "holidays>=0.47",
+  "pandas>=2.2.0",
+  "pydantic>=2.8.0",
+  "PyMuPDF>=1.24.0",
+  "python-multipart>=0.0.9",
+  "tenacity>=9.0.0",
+  "uvicorn>=0.30.0",
 ]
 
 [project.optional-dependencies]
 ingestion = [
+  "langchain-openai>=0.3.0",
+  "langfuse>=2.0.0",
   "yfinance>=0.2.54",
   "trafilatura>=1.12.0",
 ]

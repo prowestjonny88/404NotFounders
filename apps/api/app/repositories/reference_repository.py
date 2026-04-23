@@ -4,26 +4,14 @@ import json
 from pathlib import Path
 from typing import Any, List
 
-from pydantic import BaseModel, ValidationError as PydanticValidationError
+from pydantic import ValidationError as PydanticValidationError
 
 from app.core.exceptions import ValidationFailed
 from app.core.settings import AppSettings
+from app.schemas.reference import FreightRate, PortMetadata, SupplierSeed, TariffRule
 
-
-class FreightRate(BaseModel):
-    model_config = {"extra": "allow"}
-
-
-class Tariff(BaseModel):
-    model_config = {"extra": "allow"}
-
-
-class Port(BaseModel):
-    model_config = {"extra": "allow"}
-
-
-class SupplierSeed(BaseModel):
-    model_config = {"extra": "allow"}
+Tariff = TariffRule
+Port = PortMetadata
 
 
 class ReferenceRepository:

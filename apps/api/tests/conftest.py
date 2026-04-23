@@ -1,4 +1,5 @@
 import pytest
+from uuid import uuid4
 from app.core.config import Settings
 
 @pytest.fixture
@@ -18,8 +19,8 @@ def sample_extracted_quote():
     """A known-good extracted quote for testing."""
     from app.schemas.quote import ExtractedQuote
     return ExtractedQuote(
-        quote_id="test-q1",
-        upload_id="test-u1",
+        quote_id=uuid4(),
+        upload_id=uuid4(),
         supplier_name="Ningbo Precision Plastics Co. Ltd.",
         origin_port_or_country="Ningbo",
         incoterm="FOB",

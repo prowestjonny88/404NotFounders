@@ -14,6 +14,7 @@ from app.core.constants import (
 )
 from app.core.exceptions import ValidationError
 from app.repositories.reference_repository import ReferenceRepository
+from app.schemas.reference import FreightRate, PortMetadata, SupplierSeed, TariffRule
 from app.schemas.common import ensure_iso_date, ensure_required_keys
 
 
@@ -37,6 +38,23 @@ class ReferenceDataService:
             "tariffs": len(tariff_rows),
             "ports": len(port_rows),
             "resin_sources": len(source_rows),
+        }
+
+    def load_all_reference_data(self) -> dict[str, list[FreightRate] | list[TariffRule] | list[PortMetadata] | list[SupplierSeed]]:
+        freight_rates = self.repository.get_freight_rates()
+        tariffs = self.repository.get_tariffs()
+        ports = self.repository.get_ports()
+        supplier_seeds = self.repository.get_supplier_seeds()
+
+        self._validate_freight_rows([row.model_dump(mode="json") for row in freight_rates])
+        self._validate_tariff_rows([row.model_dump(mode="json") for row in tariffs])
+        self._validate_port_rows([row.model_dump(mode="json") for row in ports])
+
+        return {
+            "freight_rates": freight_rates,
+            "tariffs": tariffs,
+            "ports": ports,
+            "supplier_seeds": supplier_seeds,
         }
 
     def _validate_freight_rows(self, rows: list[dict]) -> None:
@@ -123,4 +141,9 @@ class ReferenceDataService:
                 raise ValidationError("Source row URL must be http or https")
             if row["domain"] not in parsed.netloc:
                 raise ValidationError("Source row domain must match the URL host")
+
+
+def load_all_reference_data() -> dict[str, list[FreightRate] | list[TariffRule] | list[PortMetadata] | list[SupplierSeed]]:
+    service = ReferenceDataService(ReferenceRepository())
+    return service.load_all_reference_data()
 

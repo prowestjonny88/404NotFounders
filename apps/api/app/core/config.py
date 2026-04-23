@@ -1,6 +1,10 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
 
+
+API_DIR = Path(__file__).resolve().parents[2]
+
+
 class Settings(BaseSettings):
     MODEL_API_KEY: str
     MODEL_BASE_URL: str
@@ -26,6 +30,10 @@ class Settings(BaseSettings):
     # Resilience
     USE_LAST_VALID_SNAPSHOT_ON_FAILURE: bool = True
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=API_DIR / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
 settings = Settings()

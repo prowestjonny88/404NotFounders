@@ -30,7 +30,8 @@ class SnapshotRepository:
         dataset_dir = self.snapshot_dir / dataset
         dataset_dir.mkdir(parents=True, exist_ok=True)
         timestamp = payload["fetched_at"].replace(":", "").replace("-", "").replace("T", "_").replace("Z", "Z")
-        versioned_path = dataset_dir / f"{dataset}_{timestamp}.json"
+        safe_dataset_name = dataset.replace("/", "_").replace("\\", "_")
+        versioned_path = dataset_dir / f"{safe_dataset_name}_{timestamp}.json"
         latest_path = dataset_dir / "latest.json"
         try:
             versioned_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -42,10 +43,16 @@ class SnapshotRepository:
 
     def load_latest(self, dataset: str) -> dict[str, Any] | None:
         path = self.snapshot_dir / dataset / "latest.json"
-        if not path.exists():
-            return None
-        with path.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
+        if path.exists():
+            with path.open("r", encoding="utf-8") as handle:
+                return json.load(handle)
+
+        legacy_name = f"{dataset.split('/')[-1]}_latest.json"
+        legacy_path = self.snapshot_dir / legacy_name
+        if legacy_path.exists():
+            with legacy_path.open("r", encoding="utf-8") as handle:
+                return json.load(handle)
+        return None
 
     def read_latest(self, dataset: str) -> Optional[SnapshotEnvelope]:
         data = self.load_latest(dataset)
