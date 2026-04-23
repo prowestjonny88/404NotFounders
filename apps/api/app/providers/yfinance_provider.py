@@ -1,17 +1,24 @@
+from __future__ import annotations
+
 import asyncio
-from typing import Final
+from datetime import datetime
+from typing import Any
 
 import pandas as pd
-import yfinance as yf
-from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from app.core.exceptions import ExternalFetchFailed, NormalizationFailed
+from app.core.constants import DEFAULT_FX_PAIR_TICKERS
+from app.core.exceptions import (
+    DependencyNotAvailableError,
+    ExternalFetchFailed,
+    NormalizationFailed,
+    ProviderError,
+)
 
-PAIR_TICKER_MAP: Final[dict[str, str]] = {
-    "USDMYR": "MYR=X",
-    "CNYMYR": "CNYMYR=X",
-    "THBMYR": "THBMYR=X",
-}
+try:
+    import yfinance as yf  # type: ignore
+except ImportError:  # pragma: no cover - exercised through runtime behavior
+    yf = None
 
 
 def _normalize_history_frame(history: pd.DataFrame) -> pd.DataFrame:
@@ -19,7 +26,6 @@ def _normalize_history_frame(history: pd.DataFrame) -> pd.DataFrame:
         raise NormalizationFailed("yfinance returned an empty dataset")
 
     normalized = history.copy()
-
     if isinstance(normalized.columns, pd.MultiIndex):
         normalized.columns = [
             str(level_0).lower() if str(level_0).lower() != "price" else str(level_1).lower()
@@ -48,47 +54,63 @@ def _normalize_history_frame(history: pd.DataFrame) -> pd.DataFrame:
     normalized[["open", "high", "low", "close"]] = normalized[
         ["open", "high", "low", "close"]
     ].astype(float)
-
     return normalized.sort_values("date").reset_index(drop=True)
 
 
-async def _download_history(ticker: str, period: str) -> pd.DataFrame:
-    async for attempt in AsyncRetrying(
+class YFinanceMarketDataProvider:
+    @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
-        retry=retry_if_exception_type(ExternalFetchFailed),
+        retry=retry_if_exception_type((ProviderError, NormalizationFailed)),
         reraise=True,
-    ):
-        with attempt:
-            try:
-                history = await asyncio.to_thread(
-                    yf.download,
-                    tickers=ticker,
-                    period=period,
-                    progress=False,
-                    auto_adjust=False,
-                    threads=False,
-                )
-            except Exception as exc:
-                raise ExternalFetchFailed(f"Failed to fetch {ticker} from yfinance: {exc}") from exc
+    )
+    def fetch_history(
+        self,
+        ticker: str,
+        *,
+        period: str = "6mo",
+        interval: str = "1d",
+    ) -> list[dict[str, Any]]:
+        if yf is None:
+            raise DependencyNotAvailableError(
+                "yfinance is not installed. Install project optional dependency 'ingestion'."
+            )
 
-            try:
-                return _normalize_history_frame(history)
-            except NormalizationFailed as exc:
-                raise ExternalFetchFailed(
-                    f"Failed to normalize {ticker} history from yfinance: {exc}"
-                ) from exc
+        try:
+            history = yf.download(
+                tickers=ticker,
+                period=period,
+                interval=interval,
+                progress=False,
+                auto_adjust=False,
+                threads=False,
+            )
+        except Exception as exc:  # pragma: no cover - defensive against provider failures
+            raise ProviderError(f"yfinance failed for ticker {ticker}: {exc}") from exc
 
-    raise ExternalFetchFailed(f"Exhausted retries fetching {ticker} from yfinance")
+        normalized = _normalize_history_frame(history)
+        return normalized.to_dict(orient="records")
 
 
 async def fetch_fx_history(pair: str, period: str = "1y") -> pd.DataFrame:
-    ticker = PAIR_TICKER_MAP.get(pair.upper())
+    ticker = DEFAULT_FX_PAIR_TICKERS.get(pair.upper())
     if not ticker:
         raise ExternalFetchFailed(f"Unsupported FX pair: {pair}")
 
-    return await _download_history(ticker=ticker, period=period)
+    provider = YFinanceMarketDataProvider()
+    try:
+        records = await asyncio.to_thread(provider.fetch_history, ticker, period=period)
+    except (ProviderError, DependencyNotAvailableError, NormalizationFailed) as exc:
+        raise ExternalFetchFailed(f"Failed to fetch {pair} from yfinance: {exc}") from exc
+
+    return pd.DataFrame(records, columns=["date", "open", "high", "low", "close"])
 
 
 async def fetch_energy_history(symbol: str = "BZ=F", period: str = "1y") -> pd.DataFrame:
-    return await _download_history(ticker=symbol, period=period)
+    provider = YFinanceMarketDataProvider()
+    try:
+        records = await asyncio.to_thread(provider.fetch_history, symbol, period=period)
+    except (ProviderError, DependencyNotAvailableError, NormalizationFailed) as exc:
+        raise ExternalFetchFailed(f"Failed to fetch {symbol} from yfinance: {exc}") from exc
+
+    return pd.DataFrame(records, columns=["date", "open", "high", "low", "close"])

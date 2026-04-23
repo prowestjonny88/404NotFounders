@@ -65,7 +65,7 @@ async def test_refresh_fx_snapshot_writes_envelope(monkeypatch):
     assert envelope.status == "success"
     assert envelope.record_count == 3
     assert envelope.data[0]["pair"] == "USDMYR"
-    assert written_snapshots["USDMYR"].record_count == 3
+    assert written_snapshots["fx/USDMYR"].record_count == 3
 
 
 @pytest.mark.asyncio
@@ -90,7 +90,7 @@ async def test_refresh_energy_snapshot_writes_envelope(monkeypatch):
     assert envelope.dataset == "energy/BZ=F"
     assert envelope.record_count == 3
     assert envelope.data[0]["series_name"] == "Brent Crude"
-    assert written_snapshots["BZ=F"].record_count == 3
+    assert written_snapshots["energy/BZ=F"].record_count == 3
 
 
 def test_ingest_market_fx_route(monkeypatch):
