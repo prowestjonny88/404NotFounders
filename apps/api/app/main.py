@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 
-from app.api.routes import health
+from app.api.routes import health, ingest_market
 from app.core.logging import setup_logging
 
 setup_logging()
@@ -25,3 +25,4 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
+app.include_router(ingest_market.router)
