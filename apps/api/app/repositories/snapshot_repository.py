@@ -24,7 +24,13 @@ class SnapshotRepository:
             self.snapshot_dir = Path(snapshot_root)
         self.snapshot_dir.mkdir(parents=True, exist_ok=True)
 
-    def write_snapshot(self, dataset: str, envelope: SnapshotEnvelope | dict[str, Any]) -> Path:
+    def write_snapshot(
+        self,
+        dataset: str,
+        envelope: SnapshotEnvelope | dict[str, Any],
+        *,
+        keep_history: bool = True,
+    ) -> Path:
         payload = envelope.model_dump(mode="json") if isinstance(envelope, SnapshotEnvelope) else envelope
         validate_snapshot_envelope(payload)
         dataset_dir = self.snapshot_dir / dataset
@@ -34,10 +40,17 @@ class SnapshotRepository:
         versioned_path = dataset_dir / f"{safe_dataset_name}_{timestamp}.json"
         latest_path = dataset_dir / "latest.json"
         try:
-            versioned_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            if keep_history:
+                versioned_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                written_path = versioned_path
+            else:
+                for old_path in dataset_dir.glob("*.json"):
+                    if old_path.name != "latest.json":
+                        old_path.unlink()
+                written_path = latest_path
             latest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            logger.info("Snapshot written: %s", versioned_path)
-            return versioned_path
+            logger.info("Snapshot written: %s", written_path)
+            return written_path
         except Exception as exc:
             raise SnapshotWriteFailed(f"Failed to write snapshot {dataset}: {str(exc)}") from exc
 

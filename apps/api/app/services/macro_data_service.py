@@ -14,12 +14,12 @@ class MacroDataService:
         self.provider = provider
         self.snapshot_repository = snapshot_repository
 
-    async def refresh_ipi_snapshot(self) -> SnapshotEnvelope:
+    async def refresh_ipi_snapshot(self, *, allow_partial: bool = False) -> SnapshotEnvelope:
         fetched_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         try:
             rows = await self.provider.fetch_dataset("ipi", limit=200)
         except Exception as exc:
-            return self._fallback_or_raise("macro", f"OpenDOSM IPI failed: {exc}")
+            return self._fallback_or_raise("macro", f"OpenDOSM IPI failed: {exc}", allow_partial=allow_partial)
 
         record = self._build_ipi_risk_record(rows)
         envelope = SnapshotEnvelope(
@@ -35,12 +35,12 @@ class MacroDataService:
         self.snapshot_repository.write_snapshot("macro", envelope)
         return envelope
 
-    async def refresh_trade_snapshot(self) -> SnapshotEnvelope:
+    async def refresh_trade_snapshot(self, *, allow_partial: bool = False) -> SnapshotEnvelope:
         fetched_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         try:
             rows = await self.provider.fetch_dataset("trade_sitc_1d", limit=500)
         except Exception as exc:
-            return self._fallback_or_raise("macro_trade", f"OpenDOSM trade failed: {exc}")
+            return self._fallback_or_raise("macro_trade", f"OpenDOSM trade failed: {exc}", allow_partial=allow_partial)
 
         record = self._build_trade_risk_record(rows)
         envelope = SnapshotEnvelope(
@@ -96,10 +96,10 @@ class MacroDataService:
             context["trade"] = trade_snap.data[0]
         return context
 
-    def _fallback_or_raise(self, dataset: str, message: str) -> SnapshotEnvelope:
+    def _fallback_or_raise(self, dataset: str, message: str, *, allow_partial: bool) -> SnapshotEnvelope:
         latest = self.snapshot_repository.read_latest(dataset)
-        if latest is None:
-            raise ProviderError(f"{message} and no fallback snapshot exists.")
+        if latest is None or not allow_partial:
+            raise ProviderError(message)
         return SnapshotEnvelope(
             dataset=latest.dataset,
             source=latest.source,

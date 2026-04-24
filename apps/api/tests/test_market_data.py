@@ -52,7 +52,8 @@ def test_refresh_fx_snapshot_writes_envelope(monkeypatch):
         return fixture_frame
 
     class FakeSnapshotRepository:
-        def write_snapshot(self, dataset: str, envelope: SnapshotEnvelope) -> None:
+        def write_snapshot(self, dataset: str, envelope: SnapshotEnvelope, *, keep_history: bool = True) -> None:
+            assert keep_history is True
             written_snapshots[dataset] = envelope
 
     monkeypatch.setattr(market_data_service, "fetch_fx_history", fake_fetch_fx_history)
@@ -78,7 +79,8 @@ def test_refresh_energy_snapshot_writes_envelope(monkeypatch):
         return fixture_frame
 
     class FakeSnapshotRepository:
-        def write_snapshot(self, dataset: str, envelope: SnapshotEnvelope) -> None:
+        def write_snapshot(self, dataset: str, envelope: SnapshotEnvelope, *, keep_history: bool = True) -> None:
+            assert keep_history is False
             written_snapshots[dataset] = envelope
 
     monkeypatch.setattr(market_data_service, "fetch_energy_history", fake_fetch_energy_history)

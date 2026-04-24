@@ -57,6 +57,7 @@ class LandedCostMonteCarloService:
         news = top_news or []
         logistics_news = self._news_score(news, "logistics")
         finance_news = self._news_score(news, "finance")
+        geopolitical_news = self._news_score(news, "geopolitical")
         tariff_news = self._keyword_score(news, ("tariff", "import", "policy", "duties"))
         if news:
             notes["news"] = self._news_note(news)
@@ -65,13 +66,13 @@ class LandedCostMonteCarloService:
         weather_score = self._weather_score(port_risks or [], notes)
         holiday_score = self._holiday_score(notes)
         oil_score = self._oil_score(notes)
-        resin_score = self._resin_score(resin_price_scenario, notes)
+        resin_score = self._resin_benchmark_signal(resin_price_scenario, notes)
 
         tariff_score = min(1.0, tariff_rate_pct / 20.0 + tariff_news * 0.35)
         notes["tariff"] = f"Reference tariff baseline is {tariff_rate_pct:.2f}%; tariff/news overlay score is {tariff_score:.2f}."
-        freight_score = min(1.0, 0.35 * oil_score + 0.25 * weather_score + 0.25 * logistics_news + 0.15 * holiday_score)
-        fx_score = min(1.0, 0.45 * macro_score + 0.35 * finance_news + 0.20 * oil_score)
-        news_score = min(1.0, max(logistics_news, finance_news, tariff_news))
+        freight_score = min(1.0, 0.30 * oil_score + 0.25 * weather_score + 0.25 * logistics_news + 0.15 * holiday_score + 0.05 * geopolitical_news)
+        fx_score = min(1.0, 0.45 * macro_score + 0.30 * finance_news + 0.15 * geopolitical_news + 0.10 * oil_score)
+        news_score = min(1.0, max(logistics_news, finance_news, geopolitical_news, tariff_news))
 
         return RiskDriverBreakdown(
             tariff_rate=round(tariff_score, 3),
@@ -139,13 +140,7 @@ class LandedCostMonteCarloService:
         )
         effective_fx = hedge * fx_spot + (1.0 - hedge) * fx_paths
 
-        resin_requote = self._resin_requote_factor(
-            rng=rng,
-            days=days,
-            resin_price_scenario=resin_price_scenario,
-            risk_score=risk_driver_breakdown.pp_resin_benchmark,
-        )
-        material_paths = quote.unit_price * quantity_mt * effective_fx * resin_requote
+        material_paths = quote.unit_price * quantity_mt * effective_fx
 
         freight_base_myr = self._freight_base_myr(
             quote_input=quote_input,
@@ -184,8 +179,8 @@ class LandedCostMonteCarloService:
         p90 = np.percentile(total, 90, axis=0)
         widths = p90 - p10
         method = "deterministic_9_aspect_monte_carlo"
-        if self._has_sparse_resin_history(resin_price_scenario):
-            method = "deterministic_9_aspect_monte_carlo_sparse_resin_vol_floor"
+        if resin_price_scenario:
+            method = "deterministic_monte_carlo_with_resin_benchmark_context_only"
 
         p90_spread = p90[-1] - p50[-1]
         margin_flag = bool(p90[-1] > quote_input.cost_result.total_landed_p50 * 1.12 or p90_spread > p50[-1] * 0.08)
@@ -277,27 +272,6 @@ class LandedCostMonteCarloService:
         cumulative = np.cumsum(shocks, axis=1)
         return spot * np.exp(cumulative)
 
-    def _resin_requote_factor(
-        self,
-        *,
-        rng: np.random.Generator,
-        days: np.ndarray,
-        resin_price_scenario: dict[str, Any] | None,
-        risk_score: float,
-    ) -> np.ndarray:
-        if resin_price_scenario and resin_price_scenario.get("p50_envelope"):
-            p50 = np.array(resin_price_scenario["p50_envelope"][: len(days)], dtype=float)
-            if len(p50) < len(days):
-                p50 = np.pad(p50, (0, len(days) - len(p50)), mode="edge")
-            current = max(float(resin_price_scenario.get("current_price") or p50[0]), 1.0)
-            deterministic = np.clip((p50 / current - 1.0) * 0.35, -0.10, 0.15)
-        else:
-            deterministic = np.zeros(len(days))
-        vol_floor = 0.003 + 0.01 * risk_score
-        shocks = rng.normal(loc=0.0, scale=vol_floor, size=(self.n_paths, len(days)))
-        shocks[:, 0] = 0.0
-        return np.clip(1.0 + deterministic + np.cumsum(shocks, axis=1), 0.90, 1.15)
-
     @staticmethod
     def _freight_base_myr(*, quote_input: MonteCarloQuoteInput, quantity_mt: float, fx_spot: float) -> float:
         if quote_input.freight.rate_unit.lower() == "mt":
@@ -365,11 +339,13 @@ class LandedCostMonteCarloService:
         if trade.get("status") == "DANGER":
             score += 0.55
             notes["macro_trade"] = str(trade.get("message", "Trade deficit increases MYR weakening risk."))
+        elif trade.get("message"):
+            notes["macro_trade"] = str(trade["message"])
         if ipi.get("status") == "DANGER":
             score += 0.25
             notes["macro_ipi"] = str(ipi.get("message", "Manufacturing contraction increases inventory caution."))
-        if score == 0.0:
-            notes["macro"] = "No macro danger snapshot found; using neutral macro risk."
+        elif ipi.get("message"):
+            notes["macro_ipi"] = str(ipi["message"])
         return min(1.0, score)
 
     @staticmethod
@@ -398,10 +374,23 @@ class LandedCostMonteCarloService:
         max_item = max(port_risks, key=lambda item: float(item.get("max_risk_score", 0.0)))
         max_score = float(max_item.get("max_risk_score", 0.0))
         port_name = max_item.get("port_name") or max_item.get("port_code") or "tracked port"
+        horizon = max_item.get("forecast_horizon_days")
+        endpoint = max_item.get("endpoint_used")
+        high_risk_slots = max_item.get("high_risk_slots") or []
+        slot_note = ""
+        if high_risk_slots:
+            first_slot = high_risk_slots[0]
+            slot_note = (
+                f"; top risk slot {first_slot.get('forecast_date')} has "
+                f"{first_slot.get('raw_weather_summary')} with wind {first_slot.get('wind_speed_ms')} m/s "
+                f"and precipitation {first_slot.get('precipitation_mm')} mm"
+            )
         notes["weather"] = (
             f"OpenWeather shows highest port risk at {port_name}: {max_score:.0f}/100 "
             f"around {max_item.get('worst_slot_date', 'the forecast window')} "
-            f"({max_item.get('raw_weather_summary', 'weather risk')})."
+            f"({max_item.get('raw_weather_summary', 'weather risk')}). "
+            f"Forecast source {endpoint or 'openweather'} covers {horizon or 'available'} day(s)"
+            f"{slot_note}."
         )
         return min(1.0, max_score / 100.0)
 
@@ -412,15 +401,32 @@ class LandedCostMonteCarloService:
             return 0.0
         start = date.today()
         end = start + timedelta(days=self.horizon_days)
-        holiday_count = 0
+        holidays_in_window: list[dict[str, Any]] = []
         for item in snapshot.data:
             try:
                 holiday_date = date.fromisoformat(str(item.get("date")))
             except ValueError:
                 continue
             if start <= holiday_date <= end and item.get("is_holiday", True):
-                holiday_count += 1
-        notes["holidays"] = f"{holiday_count} holiday/closure day(s) fall inside the next {self.horizon_days} days."
+                holidays_in_window.append(item)
+        holiday_count = len(holidays_in_window)
+        if holiday_count:
+            examples = "; ".join(
+                f"{item.get('country_name') or item.get('country_code')} {item.get('holiday_name')} on {item.get('date')}"
+                for item in holidays_in_window[:6]
+            )
+            notes["holidays"] = (
+                f"{holiday_count} public holiday/closure day(s) fall inside the next {self.horizon_days} days: "
+                f"{examples}."
+            )
+        else:
+            summary = next((item for item in snapshot.data if item.get("lead_time_risk") == "summary"), None)
+            notes["holidays"] = str(
+                (summary or {}).get(
+                    "glm_context",
+                    f"No Malaysia/China/Thailand/Indonesia public holidays fall inside the next {self.horizon_days} days.",
+                )
+            )
         return min(1.0, holiday_count / 6.0)
 
     def _oil_score(self, notes: dict[str, str]) -> float:
@@ -438,21 +444,23 @@ class LandedCostMonteCarloService:
         return min(1.0, max(0.0, move * 10.0 + 0.15))
 
     @staticmethod
-    def _resin_score(resin_price_scenario: dict[str, Any] | None, notes: dict[str, str]) -> float:
+    def _resin_benchmark_signal(resin_price_scenario: dict[str, Any] | None, notes: dict[str, str]) -> float:
         if not resin_price_scenario:
             notes["resin"] = "No PP resin snapshot found; using neutral resin risk."
             return 0.0
-        p10 = resin_price_scenario.get("p10_envelope") or []
-        p90 = resin_price_scenario.get("p90_envelope") or []
         current = float(resin_price_scenario.get("current_price") or 0.0)
-        if not p10 or not p90 or current <= 0:
+        history_move = abs(float(resin_price_scenario.get("history_move_pct") or 0.0))
+        observations = int(resin_price_scenario.get("history_observation_count") or 0)
+        if current <= 0:
             return 0.0
-        spread = (float(p90[-1]) - float(p10[-1])) / current
-        notes["resin"] = (
-            f"SunSirs PP scenario current price is {current:,.2f}; "
-            f"30-day P10-P90 benchmark spread is {spread:.1%}."
+        notes["resin"] = str(
+            resin_price_scenario.get("glm_context")
+            or f"SunSirs PP benchmark current price is {current:,.2f}; use this as quote-vs-market evidence only."
         )
-        return min(1.0, max(0.0, spread * 4.0))
+        # This is a benchmark explanation signal only. It is not used to move
+        # material-price paths in the Monte Carlo fan chart.
+        scarcity_penalty = 0.2 if observations < 7 else 0.0
+        return min(1.0, history_move / 10.0 + scarcity_penalty)
 
     @staticmethod
     def _news_note(news: list[dict[str, Any]]) -> str:
@@ -466,8 +474,3 @@ class LandedCostMonteCarloService:
             score = float(item.get("relevance_score", 0.0))
             parts.append(f"'{title}' from {source} (score {score:.2f})")
         return "Top GNews signals: " + "; ".join(parts) + "."
-
-    @staticmethod
-    def _has_sparse_resin_history(resin_price_scenario: dict[str, Any] | None) -> bool:
-        method = str((resin_price_scenario or {}).get("method", ""))
-        return "sparse" in method or "vol_floor" in method

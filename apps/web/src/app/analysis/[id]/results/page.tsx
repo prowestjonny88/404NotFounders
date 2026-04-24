@@ -8,7 +8,6 @@ import { useParams } from "next/navigation";
 import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { AnalysisShell } from "@/components/analysis-shell";
-import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Skeleton } from "@/components/ui/skeleton";
 import { fetchApi } from "@/lib/api";
 import { AnalysisResultPayload, BankInstructionDraft, HedgeScenarioResult, NewsEvent, SnapshotEnvelope } from "@/lib/types";
@@ -257,10 +256,6 @@ export default function ResultsPage() {
 
         <RiskDriversPanel
           analysis={analysis}
-          expectedCost={expectedCost}
-          p90Cost={p90Cost}
-          hedgeRatio={effectiveHedgeRatio}
-          direction={direction}
           latestNewsEvents={latestNewsEvents}
           latestWeatherRisks={latestWeatherRisks}
         />
@@ -319,82 +314,32 @@ export default function ResultsPage() {
 
 function RiskDriversPanel({
   analysis,
-  expectedCost,
-  p90Cost,
-  hedgeRatio,
-  direction,
   latestNewsEvents,
   latestWeatherRisks,
 }: {
   analysis?: AnalysisResultPayload;
-  expectedCost: number;
-  p90Cost: number;
-  hedgeRatio: number;
-  direction: string;
   latestNewsEvents: NewsEvent[];
   latestWeatherRisks: WeatherPortRisk[];
 }) {
   const risk = analysis?.risk_driver_breakdown;
-  const downsideBudget = Math.max(0, p90Cost - expectedCost);
   const rows = risk ? buildRiskRows(analysis, latestNewsEvents, latestWeatherRisks) : [];
-  const impactRows = rows.filter((row) => row.score >= 0.6).slice(0, 4);
-  const highlightedRows = impactRows.length ? impactRows : rows.slice(0, 2);
+  const highlightedRows = rows.filter((row) => row.score >= 0.6 && row.hasConcreteEvidence).slice(0, 4);
 
   return (
     <div className="max-h-[640px] overflow-hidden rounded-xl border border-border bg-surface p-5">
-      <Accordion defaultValue={["drivers"]}>
-        <AccordionItem value="drivers" className="border-b-0">
-          <AccordionTrigger className="py-0 hover:no-underline">
-            <div className="pr-3 text-left">
-              <h2 className="text-sm font-bold uppercase tracking-wider text-foreground">9-Aspect Risk Drivers</h2>
-              <p className="mt-1 text-xs leading-relaxed text-secondary-text">
-                Click to hide/show all driver scores. Explanation below only focuses on the drivers moving price risk most.
-              </p>
-            </div>
-          </AccordionTrigger>
-          <AccordionContent className="pb-0 pt-4">
-            {risk ? (
-              <div className="space-y-3">
-                {rows.map((row) => (
-                  <div key={row.key}>
-                    <div className="mb-1 flex justify-between text-xs uppercase tracking-wider text-secondary-text">
-                      <span>{row.label}</span>
-                      <span>{Math.round(row.score * 100)}%</span>
-                    </div>
-                    <div className="h-2 rounded-full bg-background">
-                      <div
-                        className="h-full rounded-full bg-primary"
-                        style={{ width: `${Math.min(100, Math.max(0, row.score * 100))}%` }}
-                      />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-sm text-secondary-text">Risk driver breakdown is not available yet.</p>
-            )}
-          </AccordionContent>
-        </AccordionItem>
-      </Accordion>
+      <h2 className="text-sm font-bold uppercase tracking-wider text-foreground">Risk Drivers</h2>
 
       {risk ? (
-        <div className="mt-5 max-h-[365px] space-y-4 overflow-y-auto pr-1">
-          <div className="rounded-lg border border-primary/20 bg-primary/10 p-3">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-primary">What this means</h3>
-            <p className="mt-2 text-xs leading-relaxed text-secondary-text">
-              Current P90-P50 downside is <span className="font-mono text-foreground">{formatMyr(downsideBudget)}</span>.
-              If the SME cannot absorb this amount, hedge or lock key terms. If budget can absorb it and the curve is{" "}
-              {direction}, monitor or stage the order instead of over-hedging.
-            </p>
-          </div>
-
-          {highlightedRows.map((row) => (
+        <div className="mt-4 max-h-[545px] space-y-4 overflow-y-auto pr-1">
+          {highlightedRows.length ? highlightedRows.map((row) => (
             <div key={`insight-${row.key}`} className="rounded-lg border border-border bg-[var(--color-surface-elevated)] p-3">
               <div className="mb-2 flex items-center justify-between gap-3">
                 <h3 className="text-xs font-bold uppercase tracking-wider text-foreground">{row.label}</h3>
-                <span className="font-mono text-xs text-primary">{Math.round(row.score * 100)}%</span>
               </div>
               <p className="text-xs leading-relaxed text-secondary-text">{row.evidence}</p>
+              <p className="mt-3 rounded-md border border-border bg-background/40 p-2 text-xs leading-relaxed text-secondary-text">
+                {row.effect}
+              </p>
               {row.news.length ? (
                 <div className="mt-3 space-y-2">
                   {row.news.map((item) => (
@@ -407,19 +352,22 @@ function RiskDriversPanel({
                     >
                       <span className="block font-medium text-foreground">{item.title || "Market event"}</span>
                       <span className="mt-1 block text-[11px] text-secondary-text">
-                        {item.source || "News"} · score {Math.round((item.relevance_score ?? 0) * 100)}%
+                        {item.source || "News"}
                       </span>
                     </a>
                   ))}
                 </div>
               ) : null}
-              <p className="mt-3 rounded-md border border-border bg-background/40 p-2 text-xs leading-relaxed text-secondary-text">
-                {buildImpactAdvice(row.label, row.score, downsideBudget, hedgeRatio, direction)}
-              </p>
             </div>
-          ))}
+          )) : (
+            <p className="rounded-lg border border-border bg-[var(--color-surface-elevated)] p-3 text-xs leading-relaxed text-secondary-text">
+              No high-impact live driver has concrete evidence in this run. This panel stays quiet unless a real snapshot, article, port forecast, or price move explains the risk.
+            </p>
+          )}
         </div>
-      ) : null}
+      ) : (
+        <p className="mt-4 text-sm text-secondary-text">Risk driver analysis is not available yet.</p>
+      )}
     </div>
   );
 }
@@ -444,28 +392,32 @@ function buildRiskRows(
       key: "tariff_rate",
       label: "Tariff Rate",
       score: risk.tariff_rate,
-      evidence: notes.tariff || "Tariff reference data is included, with no concrete tariff event note available.",
+      evidence: notes.tariff || "",
+      effect: "A higher tariff score raises the duty shock applied to the material leg, so the P90 landed cost can move up even when supplier price is unchanged.",
       news: filterNews(news, ["tariff", "import", "policy", "duties"]),
     },
     {
       key: "freight_rate",
       label: "Freight Rate",
       score: risk.freight_rate,
-      evidence: concreteJoin([notes.oil, notes.weather, notes.holidays], "Freight is being widened by lane rate, oil, port weather, holiday, and logistics-news signals."),
+      evidence: concreteJoin([notes.oil, notes.weather, notes.holidays], ""),
+      effect: "This widens freight and delay paths in the Monte Carlo model, lifting the upper fan band when transport or port conditions worsen.",
       news: filterNews(news, ["freight", "shipping", "port", "congestion", "logistics"]),
     },
     {
       key: "fx_currency",
       label: "FX Currency",
       score: risk.fx_currency,
-      evidence: concreteJoin([notes.macro_trade, notes.macro_ipi, notes.news], "FX risk uses current spot, historical volatility, macro trade balance, finance news, and oil pressure."),
+      evidence: concreteJoin([notes.macro_trade, notes.macro_ipi, notes.news], ""),
+      effect: "This increases MYR conversion drift or volatility. A higher score makes unhedged imported quotes more exposed, while the hedge slider only narrows this FX part.",
       news: filterNews(news, ["ringgit", "myr", "usd", "currency", "forex", "oil"]),
     },
     {
       key: "oil_price",
       label: "Oil Price",
       score: risk.oil_price,
-      evidence: notes.oil || "No concrete Brent/energy movement note was available in this run.",
+      evidence: notes.oil || "",
+      effect: "Oil pressure feeds freight surcharge uncertainty. If Brent is rising, the fan chart widens through the logistics cost component.",
       news: filterNews(news, ["oil", "brent", "energy", "fuel"]),
     },
     {
@@ -473,20 +425,23 @@ function buildRiskRows(
       label: "Weather Risk",
       score: risk.weather_risk,
       evidence: notes.weather || formatWeatherEvidence(latestWeatherRisks),
+      effect: "Port weather risk increases delay probability and demurrage-style costs, so P90 rises through the delay and freight components.",
       news: filterNews(news, ["weather", "storm", "flood", "port"]),
     },
     {
       key: "holidays",
       label: "Holidays",
       score: risk.holidays,
-      evidence: notes.holidays || "No concrete holiday-count note was available in this run.",
+      evidence: notes.holidays || "",
+      effect: "Holiday closures raise lead-time risk during the 30-day window, so the model adds a delay-cost tail rather than changing the supplier base price.",
       news: filterNews(news, ["holiday", "closure", "festival"]),
     },
     {
       key: "macro_economy",
       label: "Macro Economy",
       score: risk.macro_economy,
-      evidence: concreteJoin([notes.macro_trade, notes.macro_ipi, notes.macro], "OpenDOSM macro did not produce a concrete danger note in this run."),
+      evidence: concreteJoin([notes.macro_trade, notes.macro_ipi], ""),
+      effect: "OpenDOSM macro affects FX drift and inventory caution. A trade deficit weakens MYR risk; manufacturing contraction raises MOQ/dead-stock caution.",
       news: filterNews(news, ["manufacturing", "exports", "trade", "economy"]),
     },
     {
@@ -494,6 +449,7 @@ function buildRiskRows(
       label: "News Events",
       score: risk.news_events,
       evidence: notes.news || formatNewsEvidence(news),
+      effect: "Relevant GNews events increase FX, logistics, or tariff volatility depending on the article category and keywords selected for the run.",
       news: news.slice(0, 2),
     },
     {
@@ -502,10 +458,14 @@ function buildRiskRows(
       score: risk.pp_resin_benchmark,
       evidence: resin
         ? `${notes.resin || ""} SunSirs current PP benchmark is ${resin.current_price.toLocaleString()} ${formatResinUnit(resin.currency, resin.unit)} as of ${resin.as_of}.${marketRisk ? ` Selected quote is ${marketRisk.premium_pct.toFixed(1)}% vs benchmark and labelled ${marketRisk.risk_label.replaceAll("_", " ")}.` : ""}`
-        : notes.resin || "No concrete PP resin benchmark was available in this run.",
+        : notes.resin || "",
+      effect: "The SunSirs benchmark changes the resin requote factor and quote-vs-market warning. Wider PP benchmark range means more material-price tail risk.",
       news: filterNews(news, ["polypropylene", "pp resin", "petrochemical", "plastics", "polymer"]),
     },
-  ].sort((left, right) => right.score - left.score);
+  ].map((row) => ({
+    ...row,
+    hasConcreteEvidence: hasConcreteEvidence(row.evidence),
+  })).sort((left, right) => right.score - left.score);
 }
 
 function filterNews(news: NewsEvent[], terms: string[]) {
@@ -559,18 +519,17 @@ function concreteJoin(parts: Array<string | undefined>, fallback: string) {
   return concrete.length ? concrete.join(" ") : fallback;
 }
 
-function buildImpactAdvice(label: string, score: number, downsideBudget: number, hedgeRatio: number, direction: string) {
-  const budget = formatMyr(downsideBudget);
-  if (score >= 0.75) {
-    if (label === "FX Currency") {
-      return `Action: if budget cannot absorb ${budget}, raise hedge above ${hedgeRatio}% or lock the FX leg now.`;
-    }
-    return `Action: this is a high-impact driver. If budget cannot absorb ${budget}, lock supplier terms, request fresh validity, or build delivery buffer.`;
+function hasConcreteEvidence(evidence: string) {
+  const text = evidence.trim().toLowerCase();
+  if (!text) {
+    return false;
   }
-  if (direction === "trending lower" && score < 0.6) {
-    return "Action: fan chart trends lower and this driver is not extreme, so waiting/requoting or staging the order is reasonable if urgency allows.";
-  }
-  return `Action: monitor this driver. If downside budget is below ${budget}, hedge or lock; if budget is above it, stay neutral and recheck snapshots before ordering.`;
+  return !(
+    text.startsWith("no ") ||
+    text.includes("not available") ||
+    text.includes("neutral") ||
+    text.includes("no high-relevance")
+  );
 }
 
 function KpiCard({
