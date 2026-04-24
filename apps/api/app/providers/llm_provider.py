@@ -88,11 +88,9 @@ class GLMProvider:
             return []
         if not (self.langfuse_public_key and self.langfuse_secret_key and self.langfuse_host):
             return []
-        return [CallbackHandler(public_key=self.langfuse_public_key)]
+        return [CallbackHandler()]
 
     def trace_url_from_callbacks(self, callbacks: list[Any]) -> str | None:
-        if get_client is None:
-            return None
         trace_id = next(
             (
                 getattr(callback, "last_trace_id", None)
@@ -103,16 +101,58 @@ class GLMProvider:
         )
         if not trace_id:
             return None
+        if get_client is not None:
+            try:
+                client = get_client()
+                if hasattr(client, "flush"):
+                    client.flush()
+            except Exception:
+                pass
         if self.langfuse_host and self.langfuse_project_id:
             return f"{self.langfuse_host.rstrip('/')}/project/{self.langfuse_project_id}/traces/{trace_id}"
         try:
-            public_key = getattr(callbacks[0], "public_key", None) if callbacks else None
-            client = get_client(public_key=public_key) if public_key else get_client()
-            if hasattr(client, "flush"):
-                client.flush()
+            if get_client is None:
+                return None
+            client = get_client()
             return client.get_trace_url(trace_id=trace_id)
         except Exception:
             return None
+
+    def trace_id_from_callbacks(self, callbacks: list[Any]) -> str | None:
+        return next(
+            (
+                getattr(callback, "last_trace_id", None)
+                for callback in callbacks
+                if getattr(callback, "last_trace_id", None)
+            ),
+            None,
+        )
+
+    @staticmethod
+    def langfuse_status() -> dict[str, Any]:
+        # Ensure apps/api/.env is loaded even when this is called from a
+        # lightweight health/debug endpoint rather than via GLMProvider().__init__.
+        AppSettings.from_env()
+        host = os.getenv("LANGFUSE_BASE_URL") or os.getenv("LANGFUSE_HOST")
+        public_key = os.getenv("LANGFUSE_PUBLIC_KEY")
+        secret_key = os.getenv("LANGFUSE_SECRET_KEY")
+        project_id = os.getenv("LANGFUSE_PROJECT_ID")
+        enabled = bool(CallbackHandler and Langfuse and get_client and host and public_key and secret_key)
+        return {
+            "enabled": enabled,
+            "configured": bool(host and public_key and secret_key),
+            "sdk_available": bool(CallbackHandler and Langfuse and get_client),
+            "host": host,
+            "project_id_configured": bool(project_id),
+            "project_id": project_id,
+            "public_key_present": bool(public_key),
+            "secret_key_present": bool(secret_key),
+            "trace_url_pattern": (
+                f"{host.rstrip('/')}/project/{project_id}/traces/<trace_id>"
+                if host and project_id
+                else None
+            ),
+        }
 
     @staticmethod
     def _clean_json(raw_text: str) -> dict[str, Any]:
@@ -127,6 +167,10 @@ class GLMProvider:
             raise ProviderError(f"LLM did not return valid JSON: {content}") from exc
 
     def extract_quote_fields(self, image_bytes: bytes) -> ExtractedQuote:
+        quote, _, _ = self.extract_quote_fields_with_trace(image_bytes)
+        return quote
+
+    def extract_quote_fields_with_trace(self, image_bytes: bytes) -> tuple[ExtractedQuote, str | None, str | None]:
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
         messages = [
             SystemMessage(
@@ -147,12 +191,22 @@ class GLMProvider:
         ]
 
         try:
-            response = self.client.invoke(messages, config={"callbacks": self._callbacks()})
+            callbacks = self._callbacks()
+            response = self.client.invoke(
+                messages,
+                config={
+                    "callbacks": callbacks,
+                    "run_name": "lintasniaga-quote-extraction",
+                    "metadata": {
+                        "langfuse_tags": ["quote-extraction", "lintasniaga"],
+                    },
+                },
+            )
         except Exception as exc:
             raise ProviderError(f"Quote extraction model request failed: {exc}") from exc
         payload = self._clean_json(response.content if isinstance(response.content, str) else str(response.content))
 
-        return ExtractedQuote(
+        quote = ExtractedQuote(
             quote_id=uuid4(),
             upload_id=uuid4(),
             supplier_name=payload.get("supplier_name"),
@@ -165,15 +219,21 @@ class GLMProvider:
             payment_terms=payload.get("payment_terms"),
             extraction_confidence=None,
         )
+        return quote, self.trace_url_from_callbacks(callbacks), self.trace_id_from_callbacks(callbacks)
 
     def reason_about_recommendation(self, context: dict[str, Any]) -> str:
         try:
+            callbacks = self._callbacks()
             response = self.client.invoke(
                 [
                     SystemMessage(content="You are LintasNiaga's procurement analyst."),
                     HumanMessage(content=json.dumps(context, ensure_ascii=True)),
                 ],
-                config={"callbacks": self._callbacks()},
+                config={
+                    "callbacks": callbacks,
+                    "run_name": "lintasniaga-recommendation-reasoning",
+                    "metadata": {"langfuse_tags": ["recommendation", "lintasniaga"]},
+                },
             )
         except Exception as exc:
             raise ProviderError(f"Recommendation reasoning request failed: {exc}") from exc

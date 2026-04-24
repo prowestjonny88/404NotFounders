@@ -8,9 +8,10 @@ import { useParams } from "next/navigation";
 import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { AnalysisShell } from "@/components/analysis-shell";
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Skeleton } from "@/components/ui/skeleton";
 import { fetchApi } from "@/lib/api";
-import { AnalysisResultPayload, BankInstructionDraft, HedgeScenarioResult } from "@/lib/types";
+import { AnalysisResultPayload, BankInstructionDraft, HedgeScenarioResult, NewsEvent, SnapshotEnvelope } from "@/lib/types";
 
 import { ForwardContractPDF } from "./components/ForwardContractPDF";
 import { FxFanChart } from "./components/FxFanChart";
@@ -28,6 +29,16 @@ function winnerCurrencyPair(analysis?: AnalysisResultPayload): string | null {
 
 function formatMyr(value: number) {
   return `RM ${value.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+}
+
+interface WeatherPortRisk {
+  port_code?: string;
+  port_name?: string;
+  country_code?: string;
+  max_risk_score?: number;
+  worst_slot_date?: string;
+  raw_weather_summary?: string;
+  alert_present?: boolean;
 }
 
 function chartDirection(data?: HedgeScenarioResult | AnalysisResultPayload["selected_scenario"]) {
@@ -67,6 +78,14 @@ export default function ResultsPage() {
     queryKey: ["analysis-result", runId],
     enabled: Boolean(runId),
     queryFn: () => fetchApi<AnalysisResultPayload>(`/analysis/${runId}`),
+  });
+  const latestNewsQuery = useQuery({
+    queryKey: ["latest-news-snapshot"],
+    queryFn: () => fetchApi<SnapshotEnvelope<NewsEvent> | null>("/snapshots/latest/news"),
+  });
+  const latestWeatherQuery = useQuery({
+    queryKey: ["latest-weather-snapshot"],
+    queryFn: () => fetchApi<SnapshotEnvelope<WeatherPortRisk> | null>("/snapshots/latest/weather"),
   });
 
   const hedgeMutation = useMutation({
@@ -128,6 +147,11 @@ export default function ResultsPage() {
         analysis.ranked_quotes.length
       : 0;
   const direction = chartDirection(activeScenario);
+  const decisionGridClass = "grid gap-5 xl:grid-cols-[minmax(0,1fr)_330px]";
+  const latestNewsEvents = analysis?.top_news_events?.length
+    ? analysis.top_news_events
+    : latestNewsQuery.data?.data ?? [];
+  const latestWeatherRisks = latestWeatherQuery.data?.data ?? [];
 
   return (
     <AnalysisShell
@@ -155,7 +179,7 @@ export default function ResultsPage() {
         <KpiCard icon={<WalletCards size={16} />} label="Hedge Ratio" value={`${effectiveHedgeRatio}%`} helper={`Curve is ${direction}`} />
       </div>
 
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_330px]">
+      <div className={decisionGridClass}>
         <div className="rounded-xl border border-border bg-surface p-5">
           <div className="mb-4 flex items-start justify-between gap-3">
             <div>
@@ -195,50 +219,54 @@ export default function ResultsPage() {
               <span className="font-mono text-[var(--color-warning)]">{formatMyr(p90Cost)}</span>
             </div>
           </div>
-        </div>
 
-        <div className="rounded-xl border border-primary/20 bg-[linear-gradient(180deg,rgba(0,245,212,0.10),rgba(18,19,26,0.95))] p-5">
-          <ReasoningPanel
-            isLoading={analysisQuery.isLoading}
-            recommendation={analysis?.recommendation}
-            traceUrl={analysis?.trace_url}
-          />
+          <div className="mt-5 grid gap-4 lg:grid-cols-[minmax(280px,420px)_minmax(0,1fr)]">
+            {analysisQuery.isLoading ? (
+              <Skeleton className="h-[132px] w-full bg-border" />
+            ) : (
+              <HedgeSlider
+                hedgeRatio={effectiveHedgeRatio}
+                onHedgeChange={setHedgeRatio}
+                expectedLandedCost={expectedCost}
+              />
+            )}
 
-          {analysisQuery.isLoading ? (
-            <Skeleton className="mt-5 h-[140px] w-full bg-border" />
-          ) : (
-            <HedgeSlider
-              hedgeRatio={effectiveHedgeRatio}
-              onHedgeChange={setHedgeRatio}
-              expectedLandedCost={expectedCost}
-            />
-          )}
-
-          <div className="mt-4 space-y-3">
-            <button
-              type="button"
-              onClick={() => bankDraftMutation.mutate(effectiveHedgeRatio)}
-              disabled={!analysis || bankDraftMutation.isPending}
-              className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-3 text-sm font-bold text-background transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <Download size={16} />
-              {bankDraftMutation.isPending ? "Generating..." : "Generate Bank Instruction (Maybank / CIMB)"}
-            </button>
-            <button
-              type="button"
-              disabled
-              title="V2 roadmap: direct API execution for API-first fintech partners."
-              className="flex w-full cursor-not-allowed items-center justify-center gap-2 rounded-lg border border-border bg-background/20 px-4 py-3 text-sm font-semibold text-secondary-text opacity-70"
-            >
-              <Lock size={16} />
-              Execute via WorldFirst API (Coming Soon)
-            </button>
-            {pdfStatus ? <p className="text-xs text-primary">{pdfStatus}</p> : null}
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
+              <button
+                type="button"
+                onClick={() => bankDraftMutation.mutate(effectiveHedgeRatio)}
+                disabled={!analysis || bankDraftMutation.isPending}
+                className="flex min-h-[68px] w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-3 text-sm font-bold text-background transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Download size={16} />
+                {bankDraftMutation.isPending ? "Generating..." : "Generate Bank Instruction (Maybank / CIMB)"}
+              </button>
+              <button
+                type="button"
+                disabled
+                title="V2 roadmap: direct API execution for API-first fintech partners."
+                className="flex min-h-[68px] w-full cursor-not-allowed items-center justify-center gap-2 rounded-lg border border-border bg-background/20 px-4 py-3 text-sm font-semibold text-secondary-text opacity-70"
+              >
+                <Lock size={16} />
+                Execute via WorldFirst API (Coming Soon)
+              </button>
+              {pdfStatus ? <p className="text-xs text-primary sm:col-span-2 lg:col-span-1">{pdfStatus}</p> : null}
+            </div>
           </div>
         </div>
+
+        <RiskDriversPanel
+          analysis={analysis}
+          expectedCost={expectedCost}
+          p90Cost={p90Cost}
+          hedgeRatio={effectiveHedgeRatio}
+          direction={direction}
+          latestNewsEvents={latestNewsEvents}
+          latestWeatherRisks={latestWeatherRisks}
+        />
       </div>
 
-      <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_330px]">
+      <div className={`mt-5 ${decisionGridClass}`}>
         <div className="rounded-xl border border-border bg-surface p-5">
           <div className="mb-4 flex items-center justify-between gap-3">
             <h2 className="text-sm font-bold uppercase tracking-wider text-foreground">
@@ -277,34 +305,272 @@ export default function ResultsPage() {
           </div>
         </div>
 
-        <div className="rounded-xl border border-border bg-surface p-5">
-          <h2 className="mb-3 text-sm font-bold uppercase tracking-wider text-foreground">9-Aspect Risk Drivers</h2>
-          {analysis?.risk_driver_breakdown ? (
-            <div className="space-y-3">
-              {Object.entries(analysis.risk_driver_breakdown)
-                .filter(([key]) => key !== "notes")
-                .map(([key, value]) => (
-                  <div key={key}>
-                    <div className="mb-1 flex justify-between text-xs uppercase tracking-wider text-secondary-text">
-                      <span>{key.replaceAll("_", " ")}</span>
-                      <span>{Math.round(Number(value) * 100)}%</span>
-                    </div>
-                    <div className="h-2 rounded-full bg-background">
-                      <div
-                        className="h-full rounded-full bg-primary"
-                        style={{ width: `${Math.min(100, Math.max(0, Number(value) * 100))}%` }}
-                      />
-                    </div>
-                  </div>
-                ))}
-            </div>
-          ) : (
-            <p className="text-sm text-secondary-text">Risk driver breakdown is not available yet.</p>
-          )}
+        <div className="rounded-xl border border-primary/20 bg-[linear-gradient(180deg,rgba(0,245,212,0.10),rgba(18,19,26,0.95))] p-5">
+          <ReasoningPanel
+            isLoading={analysisQuery.isLoading}
+            recommendation={analysis?.recommendation}
+            traceUrl={analysis?.trace_url}
+          />
         </div>
       </div>
     </AnalysisShell>
   );
+}
+
+function RiskDriversPanel({
+  analysis,
+  expectedCost,
+  p90Cost,
+  hedgeRatio,
+  direction,
+  latestNewsEvents,
+  latestWeatherRisks,
+}: {
+  analysis?: AnalysisResultPayload;
+  expectedCost: number;
+  p90Cost: number;
+  hedgeRatio: number;
+  direction: string;
+  latestNewsEvents: NewsEvent[];
+  latestWeatherRisks: WeatherPortRisk[];
+}) {
+  const risk = analysis?.risk_driver_breakdown;
+  const downsideBudget = Math.max(0, p90Cost - expectedCost);
+  const rows = risk ? buildRiskRows(analysis, latestNewsEvents, latestWeatherRisks) : [];
+  const impactRows = rows.filter((row) => row.score >= 0.6).slice(0, 4);
+  const highlightedRows = impactRows.length ? impactRows : rows.slice(0, 2);
+
+  return (
+    <div className="max-h-[640px] overflow-hidden rounded-xl border border-border bg-surface p-5">
+      <Accordion defaultValue={["drivers"]}>
+        <AccordionItem value="drivers" className="border-b-0">
+          <AccordionTrigger className="py-0 hover:no-underline">
+            <div className="pr-3 text-left">
+              <h2 className="text-sm font-bold uppercase tracking-wider text-foreground">9-Aspect Risk Drivers</h2>
+              <p className="mt-1 text-xs leading-relaxed text-secondary-text">
+                Click to hide/show all driver scores. Explanation below only focuses on the drivers moving price risk most.
+              </p>
+            </div>
+          </AccordionTrigger>
+          <AccordionContent className="pb-0 pt-4">
+            {risk ? (
+              <div className="space-y-3">
+                {rows.map((row) => (
+                  <div key={row.key}>
+                    <div className="mb-1 flex justify-between text-xs uppercase tracking-wider text-secondary-text">
+                      <span>{row.label}</span>
+                      <span>{Math.round(row.score * 100)}%</span>
+                    </div>
+                    <div className="h-2 rounded-full bg-background">
+                      <div
+                        className="h-full rounded-full bg-primary"
+                        style={{ width: `${Math.min(100, Math.max(0, row.score * 100))}%` }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-secondary-text">Risk driver breakdown is not available yet.</p>
+            )}
+          </AccordionContent>
+        </AccordionItem>
+      </Accordion>
+
+      {risk ? (
+        <div className="mt-5 max-h-[365px] space-y-4 overflow-y-auto pr-1">
+          <div className="rounded-lg border border-primary/20 bg-primary/10 p-3">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-primary">What this means</h3>
+            <p className="mt-2 text-xs leading-relaxed text-secondary-text">
+              Current P90-P50 downside is <span className="font-mono text-foreground">{formatMyr(downsideBudget)}</span>.
+              If the SME cannot absorb this amount, hedge or lock key terms. If budget can absorb it and the curve is{" "}
+              {direction}, monitor or stage the order instead of over-hedging.
+            </p>
+          </div>
+
+          {highlightedRows.map((row) => (
+            <div key={`insight-${row.key}`} className="rounded-lg border border-border bg-[var(--color-surface-elevated)] p-3">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-foreground">{row.label}</h3>
+                <span className="font-mono text-xs text-primary">{Math.round(row.score * 100)}%</span>
+              </div>
+              <p className="text-xs leading-relaxed text-secondary-text">{row.evidence}</p>
+              {row.news.length ? (
+                <div className="mt-3 space-y-2">
+                  {row.news.map((item) => (
+                    <a
+                      key={`${row.key}-${item.title}-${item.url}`}
+                      href={item.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="block rounded-md border border-border bg-background/40 p-2 text-xs transition hover:border-primary/40"
+                    >
+                      <span className="block font-medium text-foreground">{item.title || "Market event"}</span>
+                      <span className="mt-1 block text-[11px] text-secondary-text">
+                        {item.source || "News"} · score {Math.round((item.relevance_score ?? 0) * 100)}%
+                      </span>
+                    </a>
+                  ))}
+                </div>
+              ) : null}
+              <p className="mt-3 rounded-md border border-border bg-background/40 p-2 text-xs leading-relaxed text-secondary-text">
+                {buildImpactAdvice(row.label, row.score, downsideBudget, hedgeRatio, direction)}
+              </p>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function buildRiskRows(
+  analysis: AnalysisResultPayload,
+  latestNewsEvents: NewsEvent[],
+  latestWeatherRisks: WeatherPortRisk[],
+) {
+  const risk = analysis.risk_driver_breakdown;
+  if (!risk) {
+    return [];
+  }
+
+  const notes = risk.notes ?? {};
+  const resin = analysis.resin_price_scenario;
+  const marketRisk = analysis.market_price_risks[0];
+  const news = analysis.top_news_events?.length ? analysis.top_news_events : latestNewsEvents;
+
+  return [
+    {
+      key: "tariff_rate",
+      label: "Tariff Rate",
+      score: risk.tariff_rate,
+      evidence: notes.tariff || "Tariff reference data is included, with no concrete tariff event note available.",
+      news: filterNews(news, ["tariff", "import", "policy", "duties"]),
+    },
+    {
+      key: "freight_rate",
+      label: "Freight Rate",
+      score: risk.freight_rate,
+      evidence: concreteJoin([notes.oil, notes.weather, notes.holidays], "Freight is being widened by lane rate, oil, port weather, holiday, and logistics-news signals."),
+      news: filterNews(news, ["freight", "shipping", "port", "congestion", "logistics"]),
+    },
+    {
+      key: "fx_currency",
+      label: "FX Currency",
+      score: risk.fx_currency,
+      evidence: concreteJoin([notes.macro_trade, notes.macro_ipi, notes.news], "FX risk uses current spot, historical volatility, macro trade balance, finance news, and oil pressure."),
+      news: filterNews(news, ["ringgit", "myr", "usd", "currency", "forex", "oil"]),
+    },
+    {
+      key: "oil_price",
+      label: "Oil Price",
+      score: risk.oil_price,
+      evidence: notes.oil || "No concrete Brent/energy movement note was available in this run.",
+      news: filterNews(news, ["oil", "brent", "energy", "fuel"]),
+    },
+    {
+      key: "weather_risk",
+      label: "Weather Risk",
+      score: risk.weather_risk,
+      evidence: notes.weather || formatWeatherEvidence(latestWeatherRisks),
+      news: filterNews(news, ["weather", "storm", "flood", "port"]),
+    },
+    {
+      key: "holidays",
+      label: "Holidays",
+      score: risk.holidays,
+      evidence: notes.holidays || "No concrete holiday-count note was available in this run.",
+      news: filterNews(news, ["holiday", "closure", "festival"]),
+    },
+    {
+      key: "macro_economy",
+      label: "Macro Economy",
+      score: risk.macro_economy,
+      evidence: concreteJoin([notes.macro_trade, notes.macro_ipi, notes.macro], "OpenDOSM macro did not produce a concrete danger note in this run."),
+      news: filterNews(news, ["manufacturing", "exports", "trade", "economy"]),
+    },
+    {
+      key: "news_events",
+      label: "News Events",
+      score: risk.news_events,
+      evidence: notes.news || formatNewsEvidence(news),
+      news: news.slice(0, 2),
+    },
+    {
+      key: "pp_resin_benchmark",
+      label: "PP Resin Benchmark",
+      score: risk.pp_resin_benchmark,
+      evidence: resin
+        ? `${notes.resin || ""} SunSirs current PP benchmark is ${resin.current_price.toLocaleString()} ${formatResinUnit(resin.currency, resin.unit)} as of ${resin.as_of}.${marketRisk ? ` Selected quote is ${marketRisk.premium_pct.toFixed(1)}% vs benchmark and labelled ${marketRisk.risk_label.replaceAll("_", " ")}.` : ""}`
+        : notes.resin || "No concrete PP resin benchmark was available in this run.",
+      news: filterNews(news, ["polypropylene", "pp resin", "petrochemical", "plastics", "polymer"]),
+    },
+  ].sort((left, right) => right.score - left.score);
+}
+
+function filterNews(news: NewsEvent[], terms: string[]) {
+  return news
+    .filter((item) => terms.some((term) => `${item.title} ${item.notes}`.toLowerCase().includes(term)))
+    .slice(0, 2);
+}
+
+function formatNewsEvidence(news: NewsEvent[]) {
+  const top = news
+    .slice()
+    .sort((left, right) => (right.relevance_score ?? 0) - (left.relevance_score ?? 0))
+    .slice(0, 3);
+  if (!top.length) {
+    return "No GNews snapshot is available for this run yet. Re-ingest news to show concrete article evidence.";
+  }
+  return `Top GNews signals: ${top
+    .map((item) => `"${item.title || "Market event"}" from ${item.source || "unknown source"} (${Math.round((item.relevance_score ?? 0) * 100)}%)`)
+    .join("; ")}.`;
+}
+
+function formatWeatherEvidence(risks: WeatherPortRisk[]) {
+  const top = risks
+    .slice()
+    .sort((left, right) => (right.max_risk_score ?? 0) - (left.max_risk_score ?? 0))
+    .slice(0, 3);
+  if (!top.length) {
+    return "No OpenWeather snapshot is available for this run yet. Re-ingest weather to show concrete port conditions.";
+  }
+  return `OpenWeather tracked procurement ports: ${top
+    .map((risk) => {
+      const port = risk.port_name || risk.port_code || "tracked port";
+      const score = Math.round(risk.max_risk_score ?? 0);
+      const summary = risk.raw_weather_summary || "weather risk";
+      const slot = risk.worst_slot_date || "forecast window";
+      return `${port} ${score}/100 on ${slot} (${summary})`;
+    })
+    .join("; ")}.`;
+}
+
+function formatResinUnit(currency: string, unit: string) {
+  const normalizedUnit = unit.toUpperCase();
+  if (normalizedUnit.includes(currency.toUpperCase())) {
+    return normalizedUnit;
+  }
+  return `${currency}/${unit}`;
+}
+
+function concreteJoin(parts: Array<string | undefined>, fallback: string) {
+  const concrete = parts.filter(Boolean);
+  return concrete.length ? concrete.join(" ") : fallback;
+}
+
+function buildImpactAdvice(label: string, score: number, downsideBudget: number, hedgeRatio: number, direction: string) {
+  const budget = formatMyr(downsideBudget);
+  if (score >= 0.75) {
+    if (label === "FX Currency") {
+      return `Action: if budget cannot absorb ${budget}, raise hedge above ${hedgeRatio}% or lock the FX leg now.`;
+    }
+    return `Action: this is a high-impact driver. If budget cannot absorb ${budget}, lock supplier terms, request fresh validity, or build delivery buffer.`;
+  }
+  if (direction === "trending lower" && score < 0.6) {
+    return "Action: fan chart trends lower and this driver is not extreme, so waiting/requoting or staging the order is reasonable if urgency allows.";
+  }
+  return `Action: monitor this driver. If downside budget is below ${budget}, hedge or lock; if budget is above it, stay neutral and recheck snapshots before ordering.`;
 }
 
 function KpiCard({

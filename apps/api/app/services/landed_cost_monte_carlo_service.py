@@ -58,6 +58,8 @@ class LandedCostMonteCarloService:
         logistics_news = self._news_score(news, "logistics")
         finance_news = self._news_score(news, "finance")
         tariff_news = self._keyword_score(news, ("tariff", "import", "policy", "duties"))
+        if news:
+            notes["news"] = self._news_note(news)
 
         macro_score = self._macro_score(macro_context or {}, notes)
         weather_score = self._weather_score(port_risks or [], notes)
@@ -66,6 +68,7 @@ class LandedCostMonteCarloService:
         resin_score = self._resin_score(resin_price_scenario, notes)
 
         tariff_score = min(1.0, tariff_rate_pct / 20.0 + tariff_news * 0.35)
+        notes["tariff"] = f"Reference tariff baseline is {tariff_rate_pct:.2f}%; tariff/news overlay score is {tariff_score:.2f}."
         freight_score = min(1.0, 0.35 * oil_score + 0.25 * weather_score + 0.25 * logistics_news + 0.15 * holiday_score)
         fx_score = min(1.0, 0.45 * macro_score + 0.35 * finance_news + 0.20 * oil_score)
         news_score = min(1.0, max(logistics_news, finance_news, tariff_news))
@@ -392,7 +395,14 @@ class LandedCostMonteCarloService:
         if not port_risks:
             notes["weather"] = "No weather snapshot found; using neutral weather risk."
             return 0.0
-        max_score = max(float(item.get("max_risk_score", 0.0)) for item in port_risks)
+        max_item = max(port_risks, key=lambda item: float(item.get("max_risk_score", 0.0)))
+        max_score = float(max_item.get("max_risk_score", 0.0))
+        port_name = max_item.get("port_name") or max_item.get("port_code") or "tracked port"
+        notes["weather"] = (
+            f"OpenWeather shows highest port risk at {port_name}: {max_score:.0f}/100 "
+            f"around {max_item.get('worst_slot_date', 'the forecast window')} "
+            f"({max_item.get('raw_weather_summary', 'weather risk')})."
+        )
         return min(1.0, max_score / 100.0)
 
     def _holiday_score(self, notes: dict[str, str]) -> float:
@@ -410,6 +420,7 @@ class LandedCostMonteCarloService:
                 continue
             if start <= holiday_date <= end and item.get("is_holiday", True):
                 holiday_count += 1
+        notes["holidays"] = f"{holiday_count} holiday/closure day(s) fall inside the next {self.horizon_days} days."
         return min(1.0, holiday_count / 6.0)
 
     def _oil_score(self, notes: dict[str, str]) -> float:
@@ -423,6 +434,7 @@ class LandedCostMonteCarloService:
         if latest <= 0 or lookback <= 0:
             return 0.0
         move = (latest - lookback) / lookback
+        notes["oil"] = f"Brent/energy snapshot moved from {lookback:.2f} to {latest:.2f} over the latest lookback, a {move:.1%} move."
         return min(1.0, max(0.0, move * 10.0 + 0.15))
 
     @staticmethod
@@ -436,7 +448,24 @@ class LandedCostMonteCarloService:
         if not p10 or not p90 or current <= 0:
             return 0.0
         spread = (float(p90[-1]) - float(p10[-1])) / current
+        notes["resin"] = (
+            f"SunSirs PP scenario current price is {current:,.2f}; "
+            f"30-day P10-P90 benchmark spread is {spread:.1%}."
+        )
         return min(1.0, max(0.0, spread * 4.0))
+
+    @staticmethod
+    def _news_note(news: list[dict[str, Any]]) -> str:
+        top = sorted(news, key=lambda item: float(item.get("relevance_score", 0.0)), reverse=True)[:3]
+        if not top:
+            return "No high-relevance news event was selected."
+        parts = []
+        for item in top:
+            title = str(item.get("title") or "Untitled news").strip()
+            source = str(item.get("source") or "unknown source").strip()
+            score = float(item.get("relevance_score", 0.0))
+            parts.append(f"'{title}' from {source} (score {score:.2f})")
+        return "Top GNews signals: " + "; ".join(parts) + "."
 
     @staticmethod
     def _has_sparse_resin_history(resin_price_scenario: dict[str, Any] | None) -> bool:

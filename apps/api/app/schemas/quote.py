@@ -40,6 +40,9 @@ class QuoteState(BaseModel):
     upload: QuoteUpload
     extracted_quote: ExtractedQuote | None = None
     validation: QuoteValidationResult | None = None
+    extraction_method: str | None = None
+    extraction_trace_urls: list[str] = []
+    extraction_trace_ids: list[str] = []
 
 
 class QuoteRepairRequest(BaseModel):

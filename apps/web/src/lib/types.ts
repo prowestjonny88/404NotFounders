@@ -31,6 +31,9 @@ export interface QuoteState {
   upload: QuoteUpload;
   extracted_quote: ExtractedQuote | null;
   validation: QuoteValidationResult | null;
+  extraction_method?: string | null;
+  extraction_trace_urls?: string[];
+  extraction_trace_ids?: string[];
 }
 
 export interface SnapshotEnvelope<T> {
@@ -112,6 +115,20 @@ export interface RiskDriverBreakdown {
   news_events: number;
   pp_resin_benchmark: number;
   notes: Record<string, string>;
+}
+
+export interface NewsEvent {
+  event_id?: string;
+  title?: string;
+  published_at?: string;
+  source?: string;
+  url?: string;
+  category?: string;
+  relevance_score?: number;
+  affected_dimension?: string;
+  notes?: string;
+  query?: string;
+  risk_hint?: string;
 }
 
 export interface LandedCostScenario {
@@ -204,6 +221,8 @@ export interface AnalysisResultPayload {
   landed_cost_scenarios: Record<string, LandedCostScenario>;
   selected_scenario: LandedCostScenario | null;
   risk_driver_breakdown: RiskDriverBreakdown | null;
+  top_news_events: NewsEvent[];
   hedge_simulation: HedgeScenarioResult | null;
   trace_url: string | null;
+  stream_trace_url: string | null;
 }

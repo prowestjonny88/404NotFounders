@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 from app.core.config import settings
+from app.providers.llm_provider import GLMProvider
 
 router = APIRouter()
 
@@ -9,3 +10,8 @@ def health_check():
         "status": "ok", 
         "model": settings.MODEL_NAME
     }
+
+
+@router.get("/health/langfuse")
+def langfuse_health_check():
+    return GLMProvider.langfuse_status()

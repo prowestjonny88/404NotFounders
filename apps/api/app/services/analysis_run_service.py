@@ -403,6 +403,7 @@ async def execute_analysis_run(
         landed_cost_scenarios=scenario_by_quote,
         selected_scenario=selected_scenario,
         risk_driver_breakdown=risk_driver_breakdown,
+        top_news_events=top_news,
         hedge_simulation=hedge_simulation,
         trace_url=trace_url,
     )
@@ -448,6 +449,36 @@ def get_context_for_run(run_id: str) -> str:
 
 def get_result_for_run(run_id: str) -> AnalysisResultPayload | None:
     return _run_results.get(run_id)
+
+
+def set_stream_trace_url_for_run(run_id: str, trace_url: str) -> None:
+    payload = _run_results.get(run_id)
+    if payload is not None:
+        payload.stream_trace_url = trace_url
+
+
+def get_traceability_for_run(run_id: str) -> dict | None:
+    payload = _run_results.get(run_id)
+    context = _run_contexts.get(run_id)
+    if payload is None or context is None:
+        return None
+    return {
+        "run_id": run_id,
+        "recommendation_trace_url": payload.trace_url,
+        "stream_trace_url": payload.stream_trace_url,
+        "langfuse_trace_available": bool(payload.trace_url),
+        "stream_trace_available": bool(payload.stream_trace_url),
+        "context_length": len(context),
+        "context_preview": context[:4000],
+        "context_includes": {
+            "news_events": "news_events" in context,
+            "weather": "port_weather_risk" in context,
+            "resin": "resin_benchmark" in context or "resin_price_scenario" in context,
+            "risk_driver_breakdown": "risk_driver_breakdown" in context,
+            "monte_carlo": "landed_cost_monte_carlo" in context,
+            "macro": "macro" in context,
+        },
+    }
 
 
 def simulate_hedge_for_run(run_id: str, hedge_ratio: float) -> HedgeScenarioResult | None:

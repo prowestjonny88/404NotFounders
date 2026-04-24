@@ -163,8 +163,10 @@ class AnalysisResultPayload(BaseModel):
     landed_cost_scenarios: Dict[str, LandedCostScenario] = Field(default_factory=dict)
     selected_scenario: LandedCostScenario | None = None
     risk_driver_breakdown: RiskDriverBreakdown | None = None
+    top_news_events: List[Dict[str, Any]] = Field(default_factory=list)
     hedge_simulation: HedgeScenarioResult | None = None
     trace_url: str | None = None
+    stream_trace_url: str | None = None
 
 
 class FxLatestPoint(BaseModel):

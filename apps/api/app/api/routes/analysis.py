@@ -16,7 +16,9 @@ from app.services.analysis_run_service import (
     draft_bank_instruction_for_run,
     get_context_for_run,
     get_result_for_run,
+    get_traceability_for_run,
     run_analysis as run_analysis_service,
+    set_stream_trace_url_for_run,
     simulate_hedge_for_run,
 )
 
@@ -75,7 +77,10 @@ async def stream_explanation(run_id: str):
         raise HTTPException(status_code=404, detail="Run ID not found or expired.")
         
     async def event_generator():
-        async for chunk in stream_analyst_explanation(context_str):
+        def capture_trace_url(trace_url: str) -> None:
+            set_stream_trace_url_for_run(run_id, trace_url)
+
+        async for chunk in stream_analyst_explanation(context_str, on_trace_url=capture_trace_url):
             # SSE format requires "data: <message>\n\n"
             # We replace newlines with a placeholder or handle them cleanly
             safe_chunk = chunk.replace("\n", "\\n")
@@ -87,6 +92,14 @@ async def stream_explanation(run_id: str):
 @router.get("/{run_id}", response_model=AnalysisResultPayload)
 async def get_analysis_result(run_id: str):
     payload = get_result_for_run(run_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Run ID not found or expired.")
+    return payload
+
+
+@router.get("/{run_id}/traceability")
+async def get_analysis_traceability(run_id: str):
+    payload = get_traceability_for_run(run_id)
     if payload is None:
         raise HTTPException(status_code=404, detail="Run ID not found or expired.")
     return payload

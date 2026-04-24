@@ -161,16 +161,27 @@ async def process_upload(file: UploadFile) -> QuoteUpload:
         uploaded_at=datetime.now(UTC),
         status="pending",
     )
-    QUOTE_STATES[quote_id] = QuoteState(upload=upload)
+    QUOTE_STATES[quote_id] = QuoteState(upload=upload, extraction_method="pending")
 
     text_pages = _extract_text_pages(pdf_bytes)
     extracted_pages = [
         quote for quote in (_extract_quote_from_text(text_page) for text_page in text_pages) if quote is not None
     ]
+    extraction_method = "pdf_text"
+    extraction_trace_urls: list[str] = []
+    extraction_trace_ids: list[str] = []
     if not extracted_pages or validate_quote(_merge_quotes(base_quote_id=quote_id, upload_id=upload_id, page_quotes=extracted_pages)).status != "valid":
         provider = build_llm_provider()
         page_images = _render_first_two_pages(pdf_bytes)
-        extracted_pages = [provider.extract_quote_fields(image_bytes) for image_bytes in page_images]
+        extraction_method = "glm_vision"
+        extracted_pages = []
+        for image_bytes in page_images:
+            extracted_quote, trace_url, trace_id = provider.extract_quote_fields_with_trace(image_bytes)
+            extracted_pages.append(extracted_quote)
+            if trace_url:
+                extraction_trace_urls.append(trace_url)
+            if trace_id:
+                extraction_trace_ids.append(trace_id)
     merged_quote = _merge_quotes(base_quote_id=quote_id, upload_id=upload_id, page_quotes=extracted_pages)
     validation = validate_quote(merged_quote)
 
@@ -179,6 +190,9 @@ async def process_upload(file: UploadFile) -> QuoteUpload:
         upload=upload,
         extracted_quote=merged_quote,
         validation=validation,
+        extraction_method=extraction_method,
+        extraction_trace_urls=extraction_trace_urls,
+        extraction_trace_ids=extraction_trace_ids,
     )
     return upload
 
@@ -206,6 +220,13 @@ def repair_quote(quote_id: UUID, updates: dict[str, object]) -> QuoteState | Non
     repaired_quote = ExtractedQuote(**updated_payload)
     validation = validate_quote(repaired_quote)
     state.upload.status = "validated" if validation.status == "valid" else "invalid"
-    updated_state = QuoteState(upload=state.upload, extracted_quote=repaired_quote, validation=validation)
+    updated_state = QuoteState(
+        upload=state.upload,
+        extracted_quote=repaired_quote,
+        validation=validation,
+        extraction_method=state.extraction_method,
+        extraction_trace_urls=state.extraction_trace_urls,
+        extraction_trace_ids=state.extraction_trace_ids,
+    )
     QUOTE_STATES[quote_id] = updated_state
     return updated_state
