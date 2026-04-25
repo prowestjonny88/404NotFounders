@@ -68,7 +68,7 @@ graph TD
     %% AI & Orchestration
     subgraph AI_Layer [🤖 AI Orchestration]
         LG[LangGraph Pipeline]
-        GLM[GLM-5.1 Provider]
+        GLM[ILMU-GLM-5.1 Provider]
         Trace[Langfuse Observability]
     end
 
