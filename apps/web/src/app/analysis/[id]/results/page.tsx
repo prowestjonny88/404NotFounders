@@ -340,7 +340,7 @@ function RiskDriversPanel({
   const highlightedRows = rows.filter((row) => row.hasConcreteEvidence).slice(0, 4);
 
   return (
-    <div className="max-h-[520px] overflow-hidden rounded-xl border border-border bg-surface p-5">
+    <div className="h-full min-h-[720px] overflow-hidden rounded-xl border border-border bg-surface p-5">
       <div className="flex items-center justify-between gap-3">
         <h2 className="text-sm font-bold uppercase tracking-wider text-foreground">Risk Drivers</h2>
         {highlightedRows.length ? (
@@ -351,7 +351,7 @@ function RiskDriversPanel({
       </div>
 
       {risk ? (
-        <div className="mt-4 max-h-[430px] space-y-3 overflow-y-auto pr-1">
+        <div className="mt-4 max-h-[630px] space-y-3 overflow-y-auto pr-1">
           {highlightedRows.length ? highlightedRows.map((row) => (
             <div
               key={`insight-${row.key}`}
