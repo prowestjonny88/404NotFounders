@@ -1,12 +1,13 @@
 import logging
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Dict, List, Tuple
 from uuid import UUID
 
 from app.core.constants import SUPPORTED_HS_CODE, SUPPORTED_IMPORT_COUNTRY
 from app.core.exceptions import NoValidQuotes
+from app.repositories.snapshot_repository import SnapshotRepository
 from app.schemas.analysis import (
     AnalysisResultPayload,
     BankInstructionDraft,
@@ -26,8 +27,8 @@ from app.services.ai_orchestrator_service import (
     get_reasoning_system_prompt,
 )
 from app.services.context_builder_service import build_ai_context
-from app.services.cost_engine_service import compute_landed_cost
 from app.services.fx_service import simulate_fx_paths
+from app.services.fx_simulation_service import LandedCostSimulationResult, simulate_landed_cost
 from app.services.landed_cost_monte_carlo_service import (
     LandedCostMonteCarloService,
     MonteCarloQuoteInput,
@@ -37,9 +38,11 @@ from app.services.quote_ingest_service import get_quote_state
 from app.services.recommendation_assembler_service import assemble_recommendation
 from app.services.recommendation_engine_service import rank_quotes
 from app.services.reference_data_service import load_all_reference_data
+from app.services.holiday_service import ensure_holiday_snapshot_fresh
 from app.services.macro_data_service import build_default_macro_service
+from app.services.market_data_service import ensure_energy_snapshot_fresh, ensure_fx_snapshot_fresh
 from app.services.news_event_service import build_default_news_service
-from app.services.resin_benchmark_service import build_default_resin_service
+from app.services.resin_benchmark_service import build_default_resin_service, ensure_resin_snapshot_fresh
 from app.services.weather_risk_service import build_default_weather_service
 
 logger = logging.getLogger(__name__)
@@ -149,36 +152,63 @@ def _match_tariff_rule(tariffs: list[TariffRule]) -> TariffRule:
     )
 
 
-def _fallback_fx_simulation(pair: str, currency: str) -> FxSimulationResult:
-    if currency == "USD":
-        current_spot = 4.7
-        p10 = 4.6
-        p50 = 4.7
-        p90 = 4.8
-    elif currency == "CNY":
-        current_spot = 0.65
-        p10 = 0.63
-        p50 = 0.65
-        p90 = 0.67
-    elif currency == "THB":
-        current_spot = 0.13
-        p10 = 0.125
-        p50 = 0.13
-        p90 = 0.135
-    else:
-        current_spot = 0.00014
-        p10 = 0.00013
-        p50 = 0.00014
-        p90 = 0.00015
-    return FxSimulationResult(
-        pair=pair,
-        current_spot=current_spot,
-        implied_vol=0.05,
-        p10_envelope=[p10] * 90,
-        p50_envelope=[p50] * 90,
-        p90_envelope=[p90] * 90,
-        horizon_days=90,
-    )
+def _require_success_snapshot(dataset: str, *, expected_source: str, min_records: int = 1) -> None:
+    envelope = SnapshotRepository().read_latest(dataset)
+    if envelope is None:
+        raise ValueError(f"Strict analysis blocked: missing snapshot {dataset}.")
+    if envelope.status != "success":
+        raise ValueError(
+            f"Strict analysis blocked: snapshot {dataset} status is {envelope.status}, expected success."
+        )
+    if envelope.source != expected_source:
+        raise ValueError(
+            f"Strict analysis blocked: snapshot {dataset} source is {envelope.source}, expected {expected_source}."
+        )
+    if envelope.record_count < min_records:
+        raise ValueError(
+            f"Strict analysis blocked: snapshot {dataset} has {envelope.record_count} rows, expected at least {min_records}."
+        )
+
+
+async def _refresh_and_validate_live_context(currencies: set[str]) -> None:
+    for currency in currencies:
+        await ensure_fx_snapshot_fresh(f"{currency}MYR", max_age_days=10, min_records=30)
+    await ensure_energy_snapshot_fresh("BZ=F", max_age_days=10, min_records=30)
+
+    macro_svc = build_default_macro_service()
+    news_svc = build_default_news_service()
+    weather_svc = build_default_weather_service()
+
+    ipi = await macro_svc.refresh_ipi_snapshot()
+    trade = await macro_svc.refresh_trade_snapshot()
+    news = await news_svc.ensure_news_snapshot_fresh(max_age_minutes=60)
+    resin = ensure_resin_snapshot_fresh(max_age_hours=24)
+    weather = await weather_svc.refresh_weather_snapshot()
+    holidays = ensure_holiday_snapshot_fresh(max_age_hours=24)
+
+    for envelope, label in (
+        (ipi, "macro"),
+        (trade, "macro_trade"),
+        (news, "news"),
+        (resin, "resin"),
+        (weather, "weather"),
+        (holidays, "holidays"),
+    ):
+        if envelope.status != "success" or envelope.record_count < 1:
+            raise ValueError(
+                f"Strict analysis blocked: live refresh for {label} returned "
+                f"status={envelope.status}, rows={envelope.record_count}."
+            )
+
+    for currency in currencies:
+        _require_success_snapshot(f"fx/{currency}MYR", expected_source="yfinance", min_records=30)
+    _require_success_snapshot("energy/BZ=F", expected_source="yfinance", min_records=30)
+    _require_success_snapshot("macro", expected_source="opendosm:ipi")
+    _require_success_snapshot("macro_trade", expected_source="opendosm:trade_sitc_1d")
+    _require_success_snapshot("news", expected_source="gnews")
+    _require_success_snapshot("resin", expected_source="SunSirs")
+    _require_success_snapshot("weather", expected_source="openweathermap")
+    _require_success_snapshot("holidays", expected_source="python-holidays")
 
 
 async def execute_analysis_run(
@@ -197,14 +227,22 @@ async def execute_analysis_run(
     tariff_rule = _match_tariff_rule(tariffs)
 
     currencies = {q.currency for q in extracted_quotes if q.currency and q.currency != "MYR"}
+    await _refresh_and_validate_live_context(currencies)
+
     fx_sims: Dict[str, FxSimulationResult] = {}
     for curr in currencies:
         pair = f"{curr}MYR"
         try:
             fx_sims[pair] = simulate_fx_paths(pair=pair)
         except Exception as exc:
-            logger.warning("Failed to simulate %s: %s", pair, exc)
-            fx_sims[pair] = _fallback_fx_simulation(pair, curr)
+            raise ValueError(
+                f"Strict analysis blocked: FX simulation for {pair} failed after live yfinance refresh: {exc}"
+            ) from exc
+
+    weather_svc = build_default_weather_service()
+    port_risks = weather_svc.get_port_risk_for_context()
+    weather_delay_days = _weather_delay_days(port_risks)
+    holidays_snapshot = SnapshotRepository().read_latest("holidays")
 
     costs: List[LandedCostResult] = []
     monte_carlo_inputs: list[MonteCarloQuoteInput] = []
@@ -222,14 +260,16 @@ async def execute_analysis_run(
             freight_rate = _match_freight_rate(quote, freight_rates, supplier_seed)
             if freight_rate is None:
                 raise ValueError(f"No freight rate match for quote {quote.quote_id}")
-            cost_result = compute_landed_cost(
+            simulation = await simulate_landed_cost(
                 quote=quote,
                 quantity_mt=quantity_mt,
-                fx_sim=fx_sim,
-                freight=freight_rate,
-                tariff=tariff_rule,
-                supplier=supplier_seed,
+                weather_delay_days=weather_delay_days,
+                holiday_buffer_days=_holiday_buffer_days_for_quote(quote, holidays_snapshot),
+                reference_data=reference_data,
+                run_id=run_id,
+                hedge_ratio_pct=0.0,
             )
+            cost_result = _simulation_to_cost_result(simulation)
             costs.append(cost_result)
             monte_carlo_inputs.append(
                 MonteCarloQuoteInput(
@@ -256,14 +296,19 @@ async def execute_analysis_run(
     macro_svc = build_default_macro_service()
     news_svc = build_default_news_service()
     resin_svc = build_default_resin_service()
-    weather_svc = build_default_weather_service()
 
     macro_context = macro_svc.get_macro_context_for_ai()
     top_news = news_svc.get_top_events_for_context(top_n=5)
     resin_benchmark = resin_svc.get_latest_benchmark_for_context()
     market_price_risks = resin_svc.build_market_price_risks(list(quote_lookup.values()), fx_sims)
     resin_price_scenario = resin_svc.build_price_scenario()
-    port_risks = weather_svc.get_port_risk_for_context()
+    holiday_context = []
+    if holidays_snapshot and holidays_snapshot.data:
+        holiday_context = [
+            item
+            for item in holidays_snapshot.data
+            if item.get("lead_time_risk") == "summary" or item.get("within_procurement_window")
+        ][:20]
     risk_by_quote_id = {risk["quote_id"]: risk for risk in market_price_risks}
     mc_service = LandedCostMonteCarloService()
     risk_driver_breakdown = mc_service.build_risk_driver_breakdown(
@@ -273,19 +318,81 @@ async def execute_analysis_run(
         resin_price_scenario=resin_price_scenario,
         tariff_rate_pct=tariff_rule.tariff_rate_pct,
     )
-    ai_context_scenarios = mc_service.build_scenarios(
+    ai_context_scenarios = await _build_fx_oil_scenarios(
         run_id=run_id,
         quote_inputs=monte_carlo_inputs,
         quantity_mt=quantity_mt,
         hedge_ratio=0.0,
-        risk_driver_breakdown=risk_driver_breakdown,
-        resin_price_scenario=resin_price_scenario,
+        reference_data=reference_data,
+        weather_delay_days=weather_delay_days,
+        holidays_snapshot=holidays_snapshot,
     )
     ai_context_winner_id = str(ranked_quotes[0].cost_result.quote_id)
     ai_context_selected_scenario = ai_context_scenarios.get(ai_context_winner_id)
 
     # Merge everything into macro_snapshot dict for context builder
     combined_snapshot: dict = {}
+    combined_snapshot["tariff_reference"] = {
+        "hs_code": tariff_rule.hs_code,
+        "product_name": tariff_rule.product_name,
+        "import_country": tariff_rule.import_country,
+        "tariff_rate_pct": tariff_rule.tariff_rate_pct,
+        "tariff_type": tariff_rule.tariff_type,
+        "source_note": tariff_rule.source_note,
+        "glm_context": (
+            f"Tariff reference for HS {tariff_rule.hs_code} ({tariff_rule.product_name}) into "
+            f"{tariff_rule.import_country}: {tariff_rule.tariff_rate_pct:.2f}% {tariff_rule.tariff_type}. "
+            f"Source note: {tariff_rule.source_note}"
+        ),
+    }
+    combined_snapshot["freight_reference_by_quote"] = [
+        {
+            "quote_id": str(item.quote.quote_id),
+            "supplier_name": item.quote.supplier_name,
+            "origin_country": item.freight.origin_country,
+            "origin_port": item.freight.origin_port,
+            "destination_port": item.freight.destination_port,
+            "incoterm": item.freight.incoterm,
+            "currency": item.freight.currency,
+            "rate_value": item.freight.rate_value,
+            "rate_unit": item.freight.rate_unit,
+            "valid_from": item.freight.valid_from.isoformat(),
+            "valid_to": item.freight.valid_to.isoformat(),
+            "source_note": item.freight.source_note,
+            "glm_context": (
+                f"Freight reference for quote {item.quote.quote_id}: {item.freight.origin_port} to "
+                f"{item.freight.destination_port}, {item.freight.rate_value:,.2f} "
+                f"{item.freight.currency}/{item.freight.rate_unit}, valid {item.freight.valid_from.isoformat()} "
+                f"to {item.freight.valid_to.isoformat()}. Source note: {item.freight.source_note}"
+            ),
+        }
+        for item in monte_carlo_inputs
+    ]
+    oil_snapshot = SnapshotRepository().read_latest("energy/BZ=F")
+    if oil_snapshot and oil_snapshot.data:
+        records = sorted(oil_snapshot.data, key=lambda row: str(row.get("date", "")))
+        latest_oil = records[-1]
+        lookback_oil = records[max(0, len(records) - 8)]
+        latest_close = float(latest_oil.get("close", 0.0) or 0.0)
+        lookback_close = float(lookback_oil.get("close", latest_close) or latest_close)
+        move_pct = ((latest_close - lookback_close) / lookback_close * 100.0) if lookback_close else 0.0
+        combined_snapshot["oil_energy_snapshot"] = {
+            "source": oil_snapshot.source,
+            "series": "BZ=F Brent crude futures",
+            "as_of": oil_snapshot.as_of,
+            "record_count": oil_snapshot.record_count,
+            "latest_date": latest_oil.get("date"),
+            "latest_close": latest_close,
+            "lookback_date": lookback_oil.get("date"),
+            "lookback_close": lookback_close,
+            "lookback_move_pct": round(move_pct, 2),
+            "glm_context": (
+                f"Brent crude yfinance snapshot BZ=F latest close {latest_close:.2f} on "
+                f"{latest_oil.get('date')}; lookback close {lookback_close:.2f} on "
+                f"{lookback_oil.get('date')} ({move_pct:.2f}% move). Oil affects freight surcharge pressure, "
+                "not supplier resin benchmark sanity checks."
+            ),
+        }
     if macro_context:
         combined_snapshot["macro"] = macro_context
     if top_news:
@@ -296,8 +403,15 @@ async def execute_analysis_run(
         combined_snapshot["market_price_risks"] = market_price_risks
     if resin_price_scenario:
         combined_snapshot["resin_price_scenario"] = resin_price_scenario
+        combined_snapshot["resin_usage_policy"] = (
+            "PP resin benchmark is quote-vs-market evidence only. It must not be treated as a Monte Carlo "
+            "material-price driver. Use it to explain below-market, fair, premium, high-premium, suspiciously low, "
+            "or suspiciously high supplier quote risk."
+        )
     if port_risks:
         combined_snapshot["port_weather_risk"] = port_risks
+    if holiday_context:
+        combined_snapshot["holiday_calendar"] = holiday_context
     combined_snapshot["risk_driver_breakdown"] = risk_driver_breakdown.model_dump(mode="json")
     if ai_context_selected_scenario:
         combined_snapshot["landed_cost_monte_carlo"] = {
@@ -338,31 +452,38 @@ async def execute_analysis_run(
     ai_json = final_state.get("ai_json_output", {})
     trace_url = final_state.get("trace_url")
 
+    if not ai_json:
+        raise ValueError("Strict analysis blocked: GLM returned empty recommendation JSON.")
+    if not trace_url:
+        raise ValueError("Strict analysis blocked: Langfuse trace URL was not captured for GLM recommendation.")
+
     recommendation = assemble_recommendation(
         ranked_quotes=ranked_quotes,
         ai_json=ai_json,
         single_quote_mode=single_quote_mode,
     )
-    scenario_by_quote = mc_service.build_scenarios(
+    scenario_by_quote = await _build_fx_oil_scenarios(
         run_id=run_id,
         quote_inputs=monte_carlo_inputs,
         quantity_mt=quantity_mt,
         hedge_ratio=recommendation.hedge_pct,
-        risk_driver_breakdown=risk_driver_breakdown,
-        resin_price_scenario=resin_price_scenario,
+        reference_data=reference_data,
+        weather_delay_days=weather_delay_days,
+        holidays_snapshot=holidays_snapshot,
     )
-    unhedged_scenario_by_quote = mc_service.build_scenarios(
+    unhedged_scenario_by_quote = await _build_fx_oil_scenarios(
         run_id=run_id,
         quote_inputs=monte_carlo_inputs,
         quantity_mt=quantity_mt,
         hedge_ratio=0.0,
-        risk_driver_breakdown=risk_driver_breakdown,
-        resin_price_scenario=resin_price_scenario,
+        reference_data=reference_data,
+        weather_delay_days=weather_delay_days,
+        holidays_snapshot=holidays_snapshot,
     )
     winner_quote_id = str(ranked_quotes[0].cost_result.quote_id)
     selected_scenario = scenario_by_quote.get(winner_quote_id)
     hedge_simulation = (
-        mc_service.to_hedge_result(
+        _scenario_to_hedge_result(
             scenario=selected_scenario,
             unhedged_scenario=unhedged_scenario_by_quote.get(winner_quote_id),
         )
@@ -385,6 +506,9 @@ async def execute_analysis_run(
     _run_monte_carlo_inputs[run_id] = {
         "quote_inputs": monte_carlo_inputs,
         "quantity_mt": quantity_mt,
+        "reference_data": reference_data,
+        "weather_delay_days": weather_delay_days,
+        "holidays_snapshot": holidays_snapshot,
         "risk_driver_breakdown": risk_driver_breakdown,
         "resin_price_scenario": resin_price_scenario,
         "winner_quote_id": winner_quote_id,
@@ -470,7 +594,12 @@ def get_traceability_for_run(run_id: str) -> dict | None:
         "context_includes": {
             "news_events": "news_events" in context,
             "weather": "port_weather_risk" in context,
+            "holidays": "holiday_calendar" in context,
             "resin": "resin_benchmark" in context or "resin_price_scenario" in context,
+            "tariff": "tariff_reference" in context,
+            "freight": "freight_reference_by_quote" in context,
+            "oil": "oil_energy_snapshot" in context,
+            "fx": "FX Simulation Summary" in context,
             "risk_driver_breakdown": "risk_driver_breakdown" in context,
             "monte_carlo": "landed_cost_monte_carlo" in context,
             "macro": "macro" in context,
@@ -478,7 +607,141 @@ def get_traceability_for_run(run_id: str) -> dict | None:
     }
 
 
-def simulate_hedge_for_run(run_id: str, hedge_ratio: float) -> HedgeScenarioResult | None:
+async def _build_fx_oil_scenarios(
+    *,
+    run_id: str,
+    quote_inputs: list[MonteCarloQuoteInput],
+    quantity_mt: float,
+    hedge_ratio: float,
+    reference_data: dict,
+    weather_delay_days: int,
+    holidays_snapshot,
+) -> dict[str, LandedCostScenario]:
+    scenarios: dict[str, LandedCostScenario] = {}
+    for quote_input in quote_inputs:
+        simulation = await simulate_landed_cost(
+            quote=quote_input.quote,
+            quantity_mt=quantity_mt,
+            weather_delay_days=weather_delay_days,
+            holiday_buffer_days=_holiday_buffer_days_for_quote(quote_input.quote, holidays_snapshot),
+            reference_data=reference_data,
+            run_id=run_id,
+            hedge_ratio_pct=hedge_ratio,
+        )
+        scenarios[str(quote_input.quote.quote_id)] = _simulation_to_scenario(
+            simulation=simulation,
+            hedge_ratio=hedge_ratio,
+        )
+    return scenarios
+
+
+def _simulation_to_cost_result(simulation: LandedCostSimulationResult) -> LandedCostResult:
+    return LandedCostResult(
+        quote_id=simulation.quote_id,
+        material_cost_myr_p10=simulation.material_p10,
+        material_cost_myr_p50=simulation.material_p50,
+        material_cost_myr_p90=simulation.material_p90,
+        freight_cost_myr=simulation.freight_p50,
+        tariff_cost_myr=simulation.tariff_p50,
+        moq_penalty=simulation.moq_penalty,
+        trust_penalty=simulation.trust_penalty,
+        total_landed_p10=simulation.p10_at_delivery,
+        total_landed_p50=simulation.p50_at_delivery,
+        total_landed_p90=simulation.p90_at_delivery,
+    )
+
+
+def _simulation_to_scenario(
+    *,
+    simulation: LandedCostSimulationResult,
+    hedge_ratio: float,
+) -> LandedCostScenario:
+    p10 = [band.p10 for band in simulation.daily_bands]
+    p50 = [band.p50 for band in simulation.daily_bands]
+    p90 = [band.p90 for band in simulation.daily_bands]
+    widths = [round(high - low, 2) for low, high in zip(p10, p90, strict=False)]
+    p90_spread = p90[-1] - p50[-1]
+    margin_flag = bool(p90[-1] > p50[0] * 1.12 or p90_spread > p50[-1] * 0.08)
+    return LandedCostScenario(
+        quote_id=simulation.quote_id,
+        currency=simulation.currency,
+        horizon_days=simulation.horizon_days,
+        hedge_ratio=round(hedge_ratio, 2),
+        current_landed_cost=p50[0],
+        p10_envelope=p10,
+        p50_envelope=p50,
+        p90_envelope=p90,
+        risk_width_envelope=widths,
+        p90_margin_wipeout_flag=margin_flag,
+        method="snapshot_fx_oil_correlated_monte_carlo",
+        as_of=date.today().isoformat(),
+    )
+
+
+def _scenario_to_hedge_result(
+    *,
+    scenario: LandedCostScenario,
+    unhedged_scenario: LandedCostScenario | None,
+) -> HedgeScenarioResult:
+    adjusted_p50 = scenario.p50_envelope[-1]
+    adjusted_p90 = scenario.p90_envelope[-1]
+    unhedged_p90 = unhedged_scenario.p90_envelope[-1] if unhedged_scenario else adjusted_p90
+    return HedgeScenarioResult(
+        hedge_ratio=scenario.hedge_ratio,
+        adjusted_p50=adjusted_p50,
+        adjusted_p90=adjusted_p90,
+        impact_vs_unhedged=round(unhedged_p90 - adjusted_p90, 2),
+        quote_id=scenario.quote_id,
+        horizon_days=scenario.horizon_days,
+        p10_envelope=scenario.p10_envelope,
+        p50_envelope=scenario.p50_envelope,
+        p90_envelope=scenario.p90_envelope,
+        risk_width_envelope=scenario.risk_width_envelope,
+        p90_margin_wipeout_flag=scenario.p90_margin_wipeout_flag,
+        method=scenario.method,
+    )
+
+
+def _weather_delay_days(port_risks: list[dict]) -> int:
+    if not port_risks:
+        return 0
+    max_score = max(float(item.get("max_risk_score", 0.0) or 0.0) for item in port_risks)
+    if max_score >= 85:
+        return 7
+    if max_score >= 70:
+        return 5
+    if max_score >= 50:
+        return 3
+    return 0
+
+
+def _holiday_buffer_days_for_quote(quote: ExtractedQuote, holidays_snapshot) -> int:
+    if holidays_snapshot is None or not holidays_snapshot.data:
+        return 0
+    origin_country = _infer_origin_country(quote.origin_port_or_country)
+    relevant_countries = {"MY"}
+    if origin_country:
+        relevant_countries.add(origin_country)
+    start = date.today()
+    end = start + timedelta(days=max(1, int(quote.lead_time_days or 30)))
+    holiday_days = 0
+    for item in holidays_snapshot.data:
+        if not item.get("is_holiday"):
+            continue
+        if item.get("country_code") not in relevant_countries:
+            continue
+        try:
+            holiday_date = date.fromisoformat(str(item.get("date")))
+        except ValueError:
+            continue
+        if start <= holiday_date <= end:
+            holiday_days += 1
+            if item.get("is_long_weekend"):
+                holiday_days += 1
+    return min(14, holiday_days)
+
+
+async def simulate_hedge_for_run(run_id: str, hedge_ratio: float) -> HedgeScenarioResult | None:
     run_payload = _run_results.get(run_id)
     mc_inputs = _run_monte_carlo_inputs.get(run_id)
     if run_payload is None or mc_inputs is None:
@@ -492,24 +755,31 @@ def simulate_hedge_for_run(run_id: str, hedge_ratio: float) -> HedgeScenarioResu
     if quote_input is None:
         return None
 
-    mc_service = LandedCostMonteCarloService()
-    scenario = mc_service.simulate_quote(
+    scenario_map = await _build_fx_oil_scenarios(
         run_id=run_id,
-        quote_input=quote_input,
+        quote_inputs=[quote_input],
         quantity_mt=float(mc_inputs["quantity_mt"]),
         hedge_ratio=hedge_ratio,
-        risk_driver_breakdown=mc_inputs["risk_driver_breakdown"],
-        resin_price_scenario=mc_inputs["resin_price_scenario"],
+        reference_data=mc_inputs["reference_data"],
+        weather_delay_days=int(mc_inputs["weather_delay_days"]),
+        holidays_snapshot=mc_inputs["holidays_snapshot"],
     )
-    unhedged_scenario = mc_service.simulate_quote(
+    unhedged_map = await _build_fx_oil_scenarios(
         run_id=run_id,
-        quote_input=quote_input,
+        quote_inputs=[quote_input],
         quantity_mt=float(mc_inputs["quantity_mt"]),
         hedge_ratio=0.0,
-        risk_driver_breakdown=mc_inputs["risk_driver_breakdown"],
-        resin_price_scenario=mc_inputs["resin_price_scenario"],
+        reference_data=mc_inputs["reference_data"],
+        weather_delay_days=int(mc_inputs["weather_delay_days"]),
+        holidays_snapshot=mc_inputs["holidays_snapshot"],
     )
-    result = mc_service.to_hedge_result(scenario=scenario, unhedged_scenario=unhedged_scenario)
+    scenario = scenario_map.get(winner_quote_id)
+    if scenario is None:
+        return None
+    result = _scenario_to_hedge_result(
+        scenario=scenario,
+        unhedged_scenario=unhedged_map.get(winner_quote_id),
+    )
 
     run_payload.selected_scenario = scenario
     run_payload.hedge_simulation = result
@@ -517,7 +787,7 @@ def simulate_hedge_for_run(run_id: str, hedge_ratio: float) -> HedgeScenarioResu
     return result
 
 
-def draft_bank_instruction_for_run(run_id: str, hedge_ratio: float) -> BankInstructionDraft | None:
+async def draft_bank_instruction_for_run(run_id: str, hedge_ratio: float) -> BankInstructionDraft | None:
     run_payload = _run_results.get(run_id)
     mc_inputs = _run_monte_carlo_inputs.get(run_id)
     if run_payload is None or mc_inputs is None or not run_payload.ranked_quotes:
@@ -525,7 +795,7 @@ def draft_bank_instruction_for_run(run_id: str, hedge_ratio: float) -> BankInstr
 
     winner = run_payload.ranked_quotes[0]
     quote = winner.quote
-    scenario = run_payload.hedge_simulation or simulate_hedge_for_run(run_id, hedge_ratio)
+    scenario = await simulate_hedge_for_run(run_id, hedge_ratio) or run_payload.hedge_simulation
     requested_strike = _fx_spot_for_quote(mc_inputs["quote_inputs"], str(quote.quote_id))
     amount = (quote.unit_price or 0.0) * float(mc_inputs["quantity_mt"])
     risk_rationale = _build_hedge_rationale(run_payload, scenario)

@@ -168,3 +168,57 @@ def test_risk_driver_normalizers_are_bounded_with_missing_snapshots():
     assert all(0.0 <= value <= 1.0 for value in values)
     assert "weather" in breakdown.notes
     assert "resin" in breakdown.notes
+
+
+def test_resin_benchmark_does_not_change_monte_carlo_paths():
+    service = LandedCostMonteCarloService(snapshot_repository=_EmptySnapshotRepository(), n_paths=500)
+    quote_input = _quote_input()
+    resin_scenario = {
+        "source": "SunSirs",
+        "current_price": 9103.33,
+        "currency": "CNY",
+        "unit": "CNY/MT",
+        "as_of": "2026-04-24",
+        "history_move_pct": 25.0,
+        "history_observation_count": 6,
+        "glm_context": "SunSirs PP benchmark moved sharply; use as quote-vs-market evidence only.",
+        "p10_envelope": [7000.0] * 90,
+        "p50_envelope": [12000.0] * 90,
+        "p90_envelope": [18000.0] * 90,
+    }
+    no_resin_breakdown = service.build_risk_driver_breakdown(
+        macro_context={},
+        top_news=[],
+        port_risks=[],
+        resin_price_scenario=None,
+        tariff_rate_pct=5.0,
+    )
+    resin_breakdown = service.build_risk_driver_breakdown(
+        macro_context={},
+        top_news=[],
+        port_risks=[],
+        resin_price_scenario=resin_scenario,
+        tariff_rate_pct=5.0,
+    )
+
+    without_resin = service.simulate_quote(
+        run_id="run-resin-policy",
+        quote_input=quote_input,
+        quantity_mt=100,
+        hedge_ratio=50,
+        risk_driver_breakdown=no_resin_breakdown,
+        resin_price_scenario=None,
+    )
+    with_resin = service.simulate_quote(
+        run_id="run-resin-policy",
+        quote_input=quote_input,
+        quantity_mt=100,
+        hedge_ratio=50,
+        risk_driver_breakdown=resin_breakdown,
+        resin_price_scenario=resin_scenario,
+    )
+
+    assert with_resin.p10_envelope == without_resin.p10_envelope
+    assert with_resin.p50_envelope == without_resin.p50_envelope
+    assert with_resin.p90_envelope == without_resin.p90_envelope
+    assert resin_breakdown.pp_resin_benchmark > 0

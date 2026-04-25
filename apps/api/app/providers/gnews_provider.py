@@ -4,6 +4,8 @@ import logging
 from functools import cached_property
 from typing import Any
 
+import httpx
+
 from app.core.exceptions import ProviderError
 
 logger = logging.getLogger(__name__)
@@ -17,19 +19,36 @@ BUCKET_A_QUERIES = [
 
 BUCKET_B_QUERIES = [
     "ringgit outlook Malaysia imports",
+    "Malaysia ringgit geopolitical risk oil shipping",
     "oil prices Asia plastics manufacturing",
     "USD MYR Malaysia manufacturing",
     "Malaysia polymer import tariff",
+]
+
+BUCKET_C_QUERIES = [
+    "geopolitical risk Asia shipping oil prices",
+    "Red Sea shipping disruption Asia ports",
+    "Middle East conflict oil freight Asia",
+    "US China trade tariffs plastics Asia",
 ]
 
 
 class GNewsProvider:
     """Wraps the gnews library, which reads Google News RSS without an API key."""
 
-    def __init__(self, max_results: int = 5, language: str = "en", country: str = "MY") -> None:
+    API_URL = "https://gnews.io/api/v4/search"
+
+    def __init__(
+        self,
+        max_results: int = 5,
+        language: str = "en",
+        country: str = "MY",
+        api_key: str | None = None,
+    ) -> None:
         self.max_results = max_results
         self.language = language
         self.country = country
+        self.api_key = api_key
 
     @cached_property
     def client(self):  # type: ignore[return]
@@ -44,10 +63,47 @@ class GNewsProvider:
         )
 
     def fetch_articles(self, query: str) -> list[dict[str, Any]]:
+        if self.api_key:
+            return self._fetch_articles_from_api(query)
+        return self._fetch_articles_from_rss(query)
+
+    def _fetch_articles_from_api(self, query: str) -> list[dict[str, Any]]:
+        params = {
+            "q": query,
+            "lang": self.language,
+            "country": self.country,
+            "max": self.max_results,
+            "in": "title,description",
+            "apikey": self.api_key,
+        }
+        try:
+            with httpx.Client(timeout=20.0) as client:
+                response = client.get(self.API_URL, params=params)
+                response.raise_for_status()
+                payload = response.json()
+        except Exception as exc:
+            raise ProviderError(f"GNews API fetch failed for '{query}': {exc}") from exc
+
+        results: list[dict[str, Any]] = []
+        for item in payload.get("articles", []) if isinstance(payload, dict) else []:
+            source = item.get("source") or {}
+            results.append(
+                {
+                    "title": item.get("title", ""),
+                    "description": item.get("description", ""),
+                    "published_at": item.get("publishedAt", ""),
+                    "source": {"name": source.get("name", "") if isinstance(source, dict) else str(source)},
+                    "url": item.get("url", ""),
+                    "_provider_mode": "gnews_api",
+                }
+            )
+        return results
+
+    def _fetch_articles_from_rss(self, query: str) -> list[dict[str, Any]]:
         try:
             raw = self.client.get_news(query)
         except Exception as exc:
-            raise ProviderError(f"GNews fetch failed for '{query}': {exc}") from exc
+            raise ProviderError(f"GNews RSS fetch failed for '{query}': {exc}") from exc
 
         results: list[dict[str, Any]] = []
         for item in raw or []:
@@ -60,6 +116,7 @@ class GNewsProvider:
                     "published_at": item.get("published date", ""),
                     "source": {"name": source_name},
                     "url": item.get("url", ""),
+                    "_provider_mode": "gnews_rss",
                 }
             )
         return results
@@ -69,6 +126,9 @@ class GNewsProvider:
 
     def fetch_bucket_b(self) -> list[dict[str, Any]]:
         return self._fetch_bucket(BUCKET_B_QUERIES, "finance")
+
+    def fetch_bucket_c(self) -> list[dict[str, Any]]:
+        return self._fetch_bucket(BUCKET_C_QUERIES, "geopolitical")
 
     def _fetch_bucket(self, queries: list[str], bucket_label: str) -> list[dict[str, Any]]:
         articles: list[dict[str, Any]] = []

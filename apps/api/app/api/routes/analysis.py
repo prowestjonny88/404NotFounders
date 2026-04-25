@@ -115,7 +115,7 @@ async def hedge_simulate(run_id: str, request: HedgeSimulateRequest):
     Pure math deterministic endpoint to recalculate risk exposure 
     based on the hedge slider value.
     """
-    result = simulate_hedge_for_run(run_id, request.hedge_ratio)
+    result = await simulate_hedge_for_run(run_id, request.hedge_ratio)
     if result is not None:
         return result
 
@@ -153,7 +153,7 @@ async def bank_instruction_draft(run_id: str, request: BankInstructionDraftReque
     Drafts JSON text for the frontend PDF printer. The backend never returns
     binary PDF content, and a deterministic fallback keeps demo flow alive.
     """
-    draft = draft_bank_instruction_for_run(run_id, request.hedge_ratio)
+    draft = await draft_bank_instruction_for_run(run_id, request.hedge_ratio)
     if draft is None:
         raise HTTPException(status_code=404, detail="Run ID not found or expired.")
     return draft

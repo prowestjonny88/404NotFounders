@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.core.constants import DEFAULT_ENERGY_SERIES, DEFAULT_FX_PAIR_TICKERS
@@ -26,6 +26,36 @@ def _normalize_as_of(value: str | datetime | None) -> str | None:
     if isinstance(value, datetime):
         return value.date().isoformat()
     return value.split("T", 1)[0]
+
+
+def _parse_snapshot_time(value: str | datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    try:
+        normalized = value.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def _is_valid_market_snapshot(envelope: SnapshotEnvelope | None, *, min_records: int) -> bool:
+    return bool(
+        envelope
+        and envelope.status == "success"
+        and envelope.source == "yfinance"
+        and envelope.record_count >= min_records
+        and envelope.data
+    )
+
+
+def _is_fresh(envelope: SnapshotEnvelope, *, max_age_days: int) -> bool:
+    fetched_at = _parse_snapshot_time(str(envelope.fetched_at))
+    if fetched_at is None:
+        return False
+    return datetime.now(UTC) - fetched_at <= timedelta(days=max_age_days)
 
 
 class MarketDataService:
@@ -128,7 +158,12 @@ class MarketDataService:
         }
 
 
-async def refresh_fx_snapshot(pair: str) -> SnapshotEnvelope:
+async def refresh_fx_snapshot(
+    pair: str,
+    *,
+    keep_history: bool = True,
+    allow_partial: bool = True,
+) -> SnapshotEnvelope:
     normalized_pair = pair.upper()
     repository = SnapshotRepository()
     fallback_fetched_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -155,9 +190,11 @@ async def refresh_fx_snapshot(pair: str) -> SnapshotEnvelope:
             record_count=len(records),
             data=[record.model_dump(mode="json") for record in records],
         )
-        repository.write_snapshot(dataset=f"fx/{normalized_pair}", envelope=envelope)
+        repository.write_snapshot(dataset=f"fx/{normalized_pair}", envelope=envelope, keep_history=keep_history)
         return envelope
     except ExternalFetchFailed as exc:
+        if not allow_partial:
+            raise
         latest = repository.read_latest(f"fx/{normalized_pair}")
         if latest is None:
             raise
@@ -170,11 +207,37 @@ async def refresh_fx_snapshot(pair: str) -> SnapshotEnvelope:
             record_count=latest.record_count,
             data=latest.data,
         )
-        repository.write_snapshot(dataset=f"fx/{normalized_pair}", envelope=envelope)
+        repository.write_snapshot(dataset=f"fx/{normalized_pair}", envelope=envelope, keep_history=keep_history)
         return envelope
 
 
-async def refresh_energy_snapshot(symbol: str) -> SnapshotEnvelope:
+async def ensure_fx_snapshot_fresh(
+    pair: str,
+    *,
+    max_age_days: int = 10,
+    min_records: int = 30,
+) -> SnapshotEnvelope:
+    normalized_pair = pair.upper()
+    repository = SnapshotRepository()
+    latest = repository.read_latest(f"fx/{normalized_pair}")
+    if _is_valid_market_snapshot(latest, min_records=min_records) and latest and _is_fresh(
+        latest,
+        max_age_days=max_age_days,
+    ):
+        return latest
+    return await refresh_fx_snapshot(
+        normalized_pair,
+        keep_history=False,
+        allow_partial=False,
+    )
+
+
+async def refresh_energy_snapshot(
+    symbol: str,
+    *,
+    keep_history: bool = False,
+    allow_partial: bool = True,
+) -> SnapshotEnvelope:
     normalized_symbol = symbol.upper()
     repository = SnapshotRepository()
     fallback_fetched_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -202,9 +265,11 @@ async def refresh_energy_snapshot(symbol: str) -> SnapshotEnvelope:
             record_count=len(records),
             data=[record.model_dump(mode="json") for record in records],
         )
-        repository.write_snapshot(dataset=f"energy/{normalized_symbol}", envelope=envelope)
+        repository.write_snapshot(dataset=f"energy/{normalized_symbol}", envelope=envelope, keep_history=keep_history)
         return envelope
     except ExternalFetchFailed:
+        if not allow_partial:
+            raise
         latest = repository.read_latest(f"energy/{normalized_symbol}")
         if latest is None:
             raise
@@ -217,8 +282,29 @@ async def refresh_energy_snapshot(symbol: str) -> SnapshotEnvelope:
             record_count=latest.record_count,
             data=latest.data,
         )
-        repository.write_snapshot(dataset=f"energy/{normalized_symbol}", envelope=envelope)
+        repository.write_snapshot(dataset=f"energy/{normalized_symbol}", envelope=envelope, keep_history=keep_history)
         return envelope
+
+
+async def ensure_energy_snapshot_fresh(
+    symbol: str = "BZ=F",
+    *,
+    max_age_days: int = 10,
+    min_records: int = 30,
+) -> SnapshotEnvelope:
+    normalized_symbol = symbol.upper()
+    repository = SnapshotRepository()
+    latest = repository.read_latest(f"energy/{normalized_symbol}")
+    if _is_valid_market_snapshot(latest, min_records=min_records) and latest and _is_fresh(
+        latest,
+        max_age_days=max_age_days,
+    ):
+        return latest
+    return await refresh_energy_snapshot(
+        normalized_symbol,
+        keep_history=False,
+        allow_partial=False,
+    )
 
 
 def build_default_market_service() -> MarketDataService:

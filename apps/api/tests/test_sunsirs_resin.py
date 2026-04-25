@@ -15,6 +15,7 @@ from app.schemas.analysis import FxSimulationResult
 from app.schemas.common import validate_resin_record
 from app.schemas.quote import ExtractedQuote
 from app.scrapers.sunsirs_pp_parser import parse_sunsirs_pp_rows
+from app.core.exceptions import ProviderError
 from app.services.resin_benchmark_service import ResinBenchmarkService, price_risk_label
 
 
@@ -60,7 +61,7 @@ def test_price_risk_labels_cover_thresholds() -> None:
     assert price_risk_label(21.0) == "high_premium"
 
 
-def test_resin_service_writes_snapshot_and_falls_back() -> None:
+def test_resin_service_writes_snapshot_and_blocks_failed_live_scrape() -> None:
     temp_dir = _local_temp_dir()
     repository = SnapshotRepository(temp_dir / "snapshots")
     raw_repository = RawRepository(temp_dir / "raw")
@@ -82,8 +83,10 @@ def test_resin_service_writes_snapshot_and_falls_back() -> None:
             raw_repository=raw_repository,
             snapshot_repository=repository,
         )
-        fallback = failing_service.refresh_sunsirs_snapshot()
+        with pytest.raises(ProviderError):
+            failing_service.refresh_sunsirs_snapshot()
 
+        fallback = failing_service.refresh_sunsirs_snapshot(allow_partial=True)
         assert fallback.status == "partial"
         assert fallback.data[0]["price_value"] == pytest.approx(9113.33)
     finally:

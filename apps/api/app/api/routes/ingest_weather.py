@@ -10,8 +10,9 @@ router = APIRouter(prefix="/ingest/weather", tags=["ingestion"])
 @router.post("", response_model=SnapshotEnvelope)
 async def ingest_weather() -> SnapshotEnvelope:
     """
-    Fetch 5-day weather forecasts for all origin/destination ports,
-    derive port risk scores, and write to weather snapshot.
+    Fetch the longest OpenWeather forecast available for the configured key
+    for all origin/destination ports, clean slot/day evidence, and write to
+    the weather snapshot. The snapshot records the endpoint actually used.
     """
     service = build_default_weather_service()
     try:

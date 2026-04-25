@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     
     # Resilience
     USE_LAST_VALID_SNAPSHOT_ON_FAILURE: bool = True
+    MONTE_CARLO_N: int = 500
 
     model_config = SettingsConfigDict(
         env_file=API_DIR / ".env",

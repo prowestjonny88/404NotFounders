@@ -53,6 +53,18 @@ class FakeGNewsProvider(GNewsProvider):
             }
         ]
 
+    def fetch_bucket_c(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "title": "Geopolitical risk raises freight concern for Asia ports",
+                "description": "Shipping disruption and oil risk may affect importers",
+                "published_at": "2026-04-24",
+                "source": {"name": "Example Geopolitics"},
+                "url": "https://example.com/geopolitics",
+                "_query": "geopolitical risk Asia shipping oil prices",
+            }
+        ]
+
 
 class FakeOpenWeatherProvider(OpenWeatherProvider):
     def __init__(self) -> None:
@@ -100,11 +112,13 @@ async def test_news_service_normalizes_and_scores_articles() -> None:
 
         assert envelope.dataset == "news"
         assert envelope.status == "success"
-        assert envelope.record_count == 2
+        assert envelope.record_count == 3
         assert envelope.data[0]["relevance_score"] > 0
+        assert {record["category"] for record in envelope.data} == {"logistics", "finance", "geopolitical"}
         assert service.get_top_events_for_context(top_n=1)[0]["risk_hint"] in {
             "lead_time_or_freight_risk",
             "fx_or_energy_risk",
+            "geopolitical_supply_chain_risk",
         }
     finally:
         shutil.rmtree(snapshot_dir, ignore_errors=True)
