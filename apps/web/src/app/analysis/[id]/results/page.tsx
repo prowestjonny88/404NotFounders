@@ -337,45 +337,51 @@ function RiskDriversPanel({
 }) {
   const risk = analysis?.risk_driver_breakdown;
   const rows = risk ? buildRiskRows(analysis, latestNewsEvents, latestWeatherRisks) : [];
-  const highlightedRows = rows.filter((row) => row.score >= 0.6 && row.hasConcreteEvidence).slice(0, 4);
+  const highlightedRows = rows.filter((row) => row.hasConcreteEvidence).slice(0, 4);
 
   return (
-    <div className="max-h-[640px] overflow-hidden rounded-xl border border-border bg-surface p-5">
-      <h2 className="text-sm font-bold uppercase tracking-wider text-foreground">Risk Drivers</h2>
+    <div className="max-h-[520px] overflow-hidden rounded-xl border border-border bg-surface p-5">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-sm font-bold uppercase tracking-wider text-foreground">Risk Drivers</h2>
+        {highlightedRows.length ? (
+          <span className="rounded-full border border-border bg-background/40 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-secondary-text">
+            Top {highlightedRows.length}
+          </span>
+        ) : null}
+      </div>
 
       {risk ? (
-        <div className="mt-4 max-h-[545px] space-y-4 overflow-y-auto pr-1">
+        <div className="mt-4 max-h-[430px] space-y-3 overflow-y-auto pr-1">
           {highlightedRows.length ? highlightedRows.map((row) => (
-            <div key={`insight-${row.key}`} className="rounded-lg border border-border bg-[var(--color-surface-elevated)] p-3">
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <h3 className="text-xs font-bold uppercase tracking-wider text-foreground">{row.label}</h3>
-              </div>
-              <p className="text-xs leading-relaxed text-secondary-text">{row.evidence}</p>
-              <p className="mt-3 rounded-md border border-border bg-background/40 p-2 text-xs leading-relaxed text-secondary-text">
-                {row.effect}
-              </p>
-              {row.news.length ? (
-                <div className="mt-3 space-y-2">
-                  {row.news.map((item) => (
-                    <a
-                      key={`${row.key}-${item.title}-${item.url}`}
-                      href={item.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="block rounded-md border border-border bg-background/40 p-2 text-xs transition hover:border-primary/40"
-                    >
-                      <span className="block font-medium text-foreground">{item.title || "Market event"}</span>
-                      <span className="mt-1 block text-[11px] text-secondary-text">
-                        {item.source || "News"}
-                      </span>
-                    </a>
-                  ))}
+            <div
+              key={`insight-${row.key}`}
+              className={`rounded-lg border bg-[var(--color-surface-elevated)] p-3 ${riskSeverity(row.score).cardClass}`}
+            >
+              <div className="mb-2 flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-foreground">{row.label}</h3>
+                  <p className="mt-1 text-[11px] leading-relaxed text-secondary-text">
+                    {compactEvidence(row)} <span className="text-foreground">Impact:</span> {compactImpact(row)}
+                  </p>
                 </div>
+                <span className={`shrink-0 rounded-full px-2 py-1 text-[9px] font-bold uppercase tracking-wider ${riskSeverity(row.score).badgeClass}`}>
+                  {riskSeverity(row.score).label}
+                </span>
+              </div>
+              {row.sourceLink ? (
+                <a
+                  href={row.sourceLink.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[11px] font-semibold text-primary transition hover:text-primary/80"
+                >
+                  Source: {row.sourceLink.label}
+                </a>
               ) : null}
             </div>
           )) : (
             <p className="rounded-lg border border-border bg-[var(--color-surface-elevated)] p-3 text-xs leading-relaxed text-secondary-text">
-              No high-impact live driver has concrete evidence in this run. This panel stays quiet unless a real snapshot, article, port forecast, or price move explains the risk.
+              No major live risk driver detected from current snapshots.
             </p>
           )}
         </div>
@@ -409,6 +415,7 @@ function buildRiskRows(
       evidence: notes.tariff || "",
       effect: "A higher tariff score raises the duty shock applied to the material leg, so the P90 landed cost can move up even when supplier price is unchanged.",
       news: filterNews(news, ["tariff", "import", "policy", "duties"]),
+      impact: "possible duty shock and higher P90 landed cost",
     },
     {
       key: "freight_rate",
@@ -417,6 +424,7 @@ function buildRiskRows(
       evidence: concreteJoin([notes.oil, notes.weather, notes.holidays], ""),
       effect: "This widens freight and delay paths in the Monte Carlo model, lifting the upper fan band when transport or port conditions worsen.",
       news: filterNews(news, ["freight", "shipping", "port", "congestion", "logistics"]),
+      impact: "wider freight tail and delivery delay exposure",
     },
     {
       key: "fx_currency",
@@ -425,6 +433,7 @@ function buildRiskRows(
       evidence: concreteJoin([notes.macro_trade, notes.macro_ipi, notes.news], ""),
       effect: "This increases MYR conversion drift or volatility. A higher score makes unhedged imported quotes more exposed, while the hedge slider only narrows this FX part.",
       news: filterNews(news, ["ringgit", "myr", "usd", "currency", "forex", "oil"]),
+      impact: "higher unhedged MYR conversion risk",
     },
     {
       key: "oil_price",
@@ -433,6 +442,7 @@ function buildRiskRows(
       evidence: notes.oil || "",
       effect: "Oil pressure feeds freight surcharge uncertainty. If Brent is rising, the fan chart widens through the logistics cost component.",
       news: filterNews(news, ["oil", "brent", "energy", "fuel"]),
+      impact: "freight surcharge pressure if Brent keeps rising",
     },
     {
       key: "weather_risk",
@@ -441,6 +451,7 @@ function buildRiskRows(
       evidence: notes.weather || formatWeatherEvidence(latestWeatherRisks),
       effect: "Port weather risk increases delay probability and demurrage-style costs, so P90 rises through the delay and freight components.",
       news: filterNews(news, ["weather", "storm", "flood", "port"]),
+      impact: "possible delay buffer and wider P90 freight tail",
     },
     {
       key: "holidays",
@@ -449,6 +460,7 @@ function buildRiskRows(
       evidence: notes.holidays || "",
       effect: "Holiday closures raise lead-time risk during the forecast window, so the model adds a delay-cost tail rather than changing the supplier base price.",
       news: filterNews(news, ["holiday", "closure", "festival"]),
+      impact: "lead-time buffer and delay-cost tail risk",
     },
     {
       key: "macro_economy",
@@ -457,6 +469,7 @@ function buildRiskRows(
       evidence: concreteJoin([notes.macro_trade, notes.macro_ipi], ""),
       effect: "OpenDOSM macro affects FX drift and inventory caution. A trade deficit weakens MYR risk; manufacturing contraction raises MOQ/dead-stock caution.",
       news: filterNews(news, ["manufacturing", "exports", "trade", "economy"]),
+      impact: "FX hedge caution and inventory/MOQ discipline",
     },
     {
       key: "news_events",
@@ -465,6 +478,7 @@ function buildRiskRows(
       evidence: notes.news || formatNewsEvidence(news),
       effect: "Relevant GNews events increase FX, logistics, or tariff volatility depending on the article category and keywords selected for the run.",
       news: news.slice(0, 2),
+      impact: "market event risk across FX, logistics, or policy",
     },
     {
       key: "pp_resin_benchmark",
@@ -473,13 +487,64 @@ function buildRiskRows(
       evidence: resin
         ? `${notes.resin || ""} SunSirs current PP benchmark is ${resin.current_price.toLocaleString()} ${formatResinUnit(resin.currency, resin.unit)} as of ${resin.as_of}.${marketRisk ? ` Selected quote is ${marketRisk.premium_pct.toFixed(1)}% vs benchmark and labelled ${marketRisk.risk_label.replaceAll("_", " ")}.` : ""}`
         : notes.resin || "",
-      effect: "The SunSirs benchmark changes the resin requote factor and quote-vs-market warning. Wider PP benchmark range means more material-price tail risk.",
+      effect: "The SunSirs benchmark flags quote-vs-market risk and helps catch premium, suspiciously low, or hidden-cost supplier pricing.",
       news: filterNews(news, ["polypropylene", "pp resin", "petrochemical", "plastics", "polymer"]),
+      impact: "verify grade, validity, and hidden fees",
     },
   ].map((row) => ({
     ...row,
     hasConcreteEvidence: hasConcreteEvidence(row.evidence),
+    sourceLink: firstNewsSource(row.news),
   })).sort((left, right) => right.score - left.score);
+}
+
+function riskSeverity(score: number) {
+  if (score >= 0.75) {
+    return {
+      label: "High Risk",
+      badgeClass: "border border-[rgba(255,107,107,0.45)] bg-[rgba(255,107,107,0.15)] text-[rgba(255,150,150,0.95)]",
+      cardClass: "border-[rgba(255,107,107,0.28)]",
+    };
+  }
+  if (score >= 0.45) {
+    return {
+      label: "Medium Risk",
+      badgeClass: "border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/15 text-[var(--color-warning)]",
+      cardClass: "border-[var(--color-warning)]/30",
+    };
+  }
+  return {
+    label: "Watch",
+    badgeClass: "border border-border bg-background/50 text-secondary-text",
+    cardClass: "border-border",
+  };
+}
+
+function compactEvidence(row: { evidence: string }) {
+  return truncateSentence(row.evidence, 185);
+}
+
+function compactImpact(row: { impact: string; effect: string }) {
+  return truncateSentence(row.impact || row.effect, 95);
+}
+
+function truncateSentence(value: string, maxLength: number) {
+  const cleaned = value.replace(/\s+/g, " ").trim();
+  if (cleaned.length <= maxLength) {
+    return cleaned;
+  }
+  return `${cleaned.slice(0, maxLength - 1).trim()}...`;
+}
+
+function firstNewsSource(news: NewsEvent[]) {
+  const first = news.find((item) => item.url);
+  if (!first?.url) {
+    return null;
+  }
+  return {
+    url: first.url,
+    label: first.source || "news",
+  };
 }
 
 function filterNews(news: NewsEvent[], terms: string[]) {
