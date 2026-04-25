@@ -44,8 +44,7 @@ Thumbs.db
 *.pem
 
 # Antigravity local artifacts
-.antigravity/*
-!.antigravity/rules.md
+.antigravity/
 
 # Logs
 npm-debug.log*
